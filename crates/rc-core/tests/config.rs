@@ -120,7 +120,8 @@ fn rejects_relay_only_without_servers() {
 
 #[test]
 fn rejects_out_of_range_numbers() {
-    let cases: [(&str, fn(&mut Config)); 6] = [
+    type Mutate = fn(&mut Config);
+    let cases: [(&str, Mutate); 6] = [
         ("security.approval_timeout_secs", |c| {
             c.security.approval_timeout_secs = 0
         }),
