@@ -2557,7 +2557,9 @@ name = "rc-desktop"
 version = "0.1.0"
 dependencies = [
  "rc-capture",
+ "rc-codec",
  "rc-core",
+ "rc-protocol",
  "serde",
  "tauri",
  "tauri-build",
