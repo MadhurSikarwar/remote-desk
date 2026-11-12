@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 
 /// Bumped on any incompatible change; peers with different versions refuse
 /// to talk.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Upper bound on one message, so a corrupt or hostile length prefix cannot
 /// make the reader allocate without limit. A 4K keyframe is far below this.
@@ -32,6 +32,51 @@ pub enum Role {
     Host,
     /// The device that views it.
     Viewer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// One mouse or keyboard action by the viewer.
+///
+/// Positions are fractions of the shared display: 0 is the left or top
+/// edge, 65535 the right or bottom edge. That keeps them independent of the
+/// size at which the viewer happens to draw the picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    MouseMove {
+        x: u16,
+        y: u16,
+    },
+    MouseButton {
+        button: MouseButton,
+        down: bool,
+        x: u16,
+        y: u16,
+    },
+    /// Wheel movement in the units Windows uses: 120 per notch, positive
+    /// away from the user (`dy`) or to the right (`dx`).
+    MouseWheel {
+        dx: i16,
+        dy: i16,
+    },
+    /// A physical key, identified by its PC keyboard scan code so the
+    /// host's own keyboard layout decides which character it produces.
+    Key {
+        scancode: u16,
+        extended: bool,
+        down: bool,
+    },
+}
+
+/// What the host currently lets the viewer do besides watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Permissions {
+    pub input: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +97,10 @@ pub enum Message {
     KeyframeRequest,
     /// Orderly end of the session.
     Bye { reason: String },
+    /// Viewer to host. Ignored unless the host has allowed input.
+    Input(InputEvent),
+    /// Host to viewer, at the start of a session and whenever it changes.
+    Permissions(Permissions),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +123,15 @@ mod tag {
     pub const VIDEO_FRAME: u8 = 3;
     pub const KEYFRAME_REQUEST: u8 = 4;
     pub const BYE: u8 = 5;
+    pub const INPUT: u8 = 6;
+    pub const PERMISSIONS: u8 = 7;
+}
+
+mod input_tag {
+    pub const MOUSE_MOVE: u8 = 1;
+    pub const MOUSE_BUTTON: u8 = 2;
+    pub const MOUSE_WHEEL: u8 = 3;
+    pub const KEY: u8 = 4;
 }
 
 /// Reads fields from a message body, failing instead of panicking when the
@@ -110,6 +168,18 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(self.array()?))
     }
 
+    fn i16(&mut self) -> Result<i16, ProtocolError> {
+        Ok(i16::from_le_bytes(self.array()?))
+    }
+
+    fn bool(&mut self) -> Result<bool, ProtocolError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(ProtocolError::Malformed("bad flag")),
+        }
+    }
+
     fn u64(&mut self) -> Result<u64, ProtocolError> {
         Ok(u64::from_le_bytes(self.array()?))
     }
@@ -131,6 +201,74 @@ impl<'a> Reader<'a> {
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
+}
+
+impl InputEvent {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match *self {
+            Self::MouseMove { x, y } => {
+                out.push(input_tag::MOUSE_MOVE);
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+            }
+            Self::MouseButton { button, down, x, y } => {
+                out.push(input_tag::MOUSE_BUTTON);
+                out.push(match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Right => 1,
+                    MouseButton::Middle => 2,
+                });
+                out.push(u8::from(down));
+                out.extend_from_slice(&x.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+            }
+            Self::MouseWheel { dx, dy } => {
+                out.push(input_tag::MOUSE_WHEEL);
+                out.extend_from_slice(&dx.to_le_bytes());
+                out.extend_from_slice(&dy.to_le_bytes());
+            }
+            Self::Key {
+                scancode,
+                extended,
+                down,
+            } => {
+                out.push(input_tag::KEY);
+                out.extend_from_slice(&scancode.to_le_bytes());
+                out.push(u8::from(extended));
+                out.push(u8::from(down));
+            }
+        }
+    }
+
+    fn decode(r: &mut Reader<'_>) -> Result<Self, ProtocolError> {
+        Ok(match r.u8()? {
+            input_tag::MOUSE_MOVE => Self::MouseMove {
+                x: r.u16()?,
+                y: r.u16()?,
+            },
+            input_tag::MOUSE_BUTTON => Self::MouseButton {
+                button: match r.u8()? {
+                    0 => MouseButton::Left,
+                    1 => MouseButton::Right,
+                    2 => MouseButton::Middle,
+                    _ => return Err(ProtocolError::Malformed("unknown mouse button")),
+                },
+                down: r.bool()?,
+                x: r.u16()?,
+                y: r.u16()?,
+            },
+            input_tag::MOUSE_WHEEL => Self::MouseWheel {
+                dx: r.i16()?,
+                dy: r.i16()?,
+            },
+            input_tag::KEY => Self::Key {
+                scancode: r.u16()?,
+                extended: r.bool()?,
+                down: r.bool()?,
+            },
+            _ => return Err(ProtocolError::Malformed("unknown input event")),
+        })
+    }
 }
 
 impl Message {
@@ -170,6 +308,14 @@ impl Message {
                     end -= 1;
                 }
                 put_bytes(out, &reason.as_bytes()[..end]);
+            }
+            Self::Input(event) => {
+                out.push(tag::INPUT);
+                event.encode(out);
+            }
+            Self::Permissions(permissions) => {
+                out.push(tag::PERMISSIONS);
+                out.push(u8::from(permissions.input));
             }
         }
     }
@@ -211,6 +357,16 @@ impl Message {
                     reason: String::from_utf8(text.to_vec())
                         .map_err(|_| ProtocolError::Malformed("text is not UTF-8"))?,
                 }
+            }
+            tag::INPUT => Self::Input(InputEvent::decode(&mut r)?),
+            tag::PERMISSIONS => {
+                let flags = r.u8()?;
+                if flags & !1 != 0 {
+                    return Err(ProtocolError::Malformed("unknown permission"));
+                }
+                Self::Permissions(Permissions {
+                    input: flags & 1 != 0,
+                })
             }
             other => return Err(ProtocolError::UnknownType(other)),
         };
@@ -319,6 +475,21 @@ mod tests {
             Message::Bye {
                 reason: "stopped by the user — bye".into(),
             },
+            Message::Input(InputEvent::MouseMove { x: 0, y: 65535 }),
+            Message::Input(InputEvent::MouseButton {
+                button: MouseButton::Right,
+                down: true,
+                x: 1234,
+                y: 4321,
+            }),
+            Message::Input(InputEvent::MouseWheel { dx: -120, dy: 240 }),
+            Message::Input(InputEvent::Key {
+                scancode: 0x1D,
+                extended: true,
+                down: false,
+            }),
+            Message::Permissions(Permissions { input: true }),
+            Message::Permissions(Permissions::default()),
         ]
     }
 
@@ -399,8 +570,14 @@ mod tests {
             Message::decode_body(&[]),
             Err(ProtocolError::Empty)
         ));
-        // Hello with role 9, frame with keyframe flag 2, Bye with invalid UTF-8.
+        // Hello with role 9, frame with keyframe flag 2, Bye with invalid UTF-8,
+        // input of an unknown kind, mouse button 7, key with flag 2,
+        // permissions with an unknown bit.
         for body in [
+            vec![tag::INPUT, 99],
+            vec![tag::INPUT, input_tag::MOUSE_BUTTON, 7, 1, 0, 0, 0, 0],
+            vec![tag::INPUT, input_tag::KEY, 0x1E, 0, 0, 2],
+            vec![tag::PERMISSIONS, 0x80],
             vec![tag::HELLO, 1, 0, 9],
             vec![tag::VIDEO_FRAME, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![tag::BYE, 2, 0, 0, 0, 0xFF, 0xFE],
