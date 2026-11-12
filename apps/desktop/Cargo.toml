@@ -9,6 +9,7 @@ publish.workspace = true
 tauri-build = { workspace = true }
 
 [dependencies]
+rc-capture = { path = "../../crates/rc-capture" }
 rc-core = { path = "../../crates/rc-core" }
 serde.workspace = true
 tauri.workspace = true

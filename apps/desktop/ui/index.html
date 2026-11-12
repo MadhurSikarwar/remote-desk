@@ -28,6 +28,21 @@
         </dl>
       </section>
 
+      <section>
+        <h2>Screen capture test</h2>
+        <p class="muted">
+          Captures this screen on this device only, to check that capture
+          works. Nothing is recorded or sent anywhere.
+        </p>
+        <div class="row">
+          <label>Display
+            <select id="capture-display"></select>
+          </label>
+          <button id="capture-toggle" type="button" disabled>Start capture</button>
+        </div>
+        <p id="capture-stats" role="status"></p>
+      </section>
+
       <form id="settings" novalidate>
         <section>
           <h2>Device</h2>

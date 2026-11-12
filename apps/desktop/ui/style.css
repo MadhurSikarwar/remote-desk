@@ -74,6 +74,17 @@ p {
   white-space: nowrap;
 }
 
+.pill.live {
+  border-color: var(--error);
+  background: var(--error-bg);
+  color: var(--error);
+  font-weight: 600;
+}
+
+.row > button {
+  margin-bottom: 12px;
+}
+
 .banner {
   margin: 16px 24px 0;
   padding: 12px 16px;

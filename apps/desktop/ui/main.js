@@ -98,7 +98,69 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
+const sharing = document.getElementById("sharing");
+const captureDisplay = document.getElementById("capture-display");
+const captureToggle = document.getElementById("capture-toggle");
+const captureStats = document.getElementById("capture-stats");
+let captureTimer = null;
+
+function showCapture(status) {
+  sharing.textContent = status.active ? "Capturing screen" : "Not sharing";
+  sharing.classList.toggle("live", status.active);
+  captureToggle.textContent = status.active ? "Stop capture" : "Start capture";
+  captureToggle.dataset.active = String(status.active);
+  captureDisplay.disabled = status.active;
+
+  captureStats.classList.toggle("error", Boolean(status.error));
+  if (status.error) {
+    captureStats.textContent = status.error;
+  } else if (status.active && status.blocked) {
+    captureStats.textContent = "Waiting: the lock screen or a system prompt is showing.";
+  } else if (status.frames > 0 || status.active) {
+    const rate = status.seconds > 0 ? (status.frames / status.seconds).toFixed(1) : "0.0";
+    captureStats.textContent =
+      `${status.active ? "" : "Stopped. "}` +
+      `${status.width}×${status.height} — ${status.frames} frames in ` +
+      `${status.seconds.toFixed(0)} s (${rate} per second)`;
+  }
+
+  if (status.active && captureTimer === null) {
+    captureTimer = setInterval(async () => showCapture(await invoke("capture_status")), 1000);
+  } else if (!status.active && captureTimer !== null) {
+    clearInterval(captureTimer);
+    captureTimer = null;
+  }
+}
+
+captureToggle.addEventListener("click", async () => {
+  captureToggle.disabled = true;
+  try {
+    const status = captureToggle.dataset.active === "true"
+      ? await invoke("stop_capture")
+      : await invoke("start_capture", { display: Number(captureDisplay.value) });
+    showCapture(status);
+  } catch (error) {
+    captureStats.textContent = String(error.message ?? error);
+    captureStats.classList.add("error");
+  }
+  captureToggle.disabled = false;
+});
+
+async function startCapturePanel() {
+  try {
+    for (const display of await invoke("list_displays")) {
+      captureDisplay.add(new Option(display.label, display.index));
+    }
+    captureToggle.disabled = captureDisplay.options.length === 0;
+    showCapture(await invoke("capture_status"));
+  } catch (error) {
+    captureStats.textContent = String(error.message ?? error);
+    captureStats.classList.add("error");
+  }
+}
+
 async function start() {
+  startCapturePanel();
   try {
     const status = await showStatus();
     current = await invoke("get_config");
