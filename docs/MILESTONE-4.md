@@ -12,8 +12,9 @@ channel of milestone 5.
 
 ## Status
 
-Control works and is gated by the host. One problem is open: the
-application sometimes stalls while shutting down (see "Shutdown").
+Control works and is gated by the host. A shutdown stall seen during this
+milestone has a probable cause and a fix, but could not be reproduced to
+confirm it (see "Shutdown").
 
 | Part | Files |
 |---|---|
@@ -113,30 +114,51 @@ keystrokes at an arbitrary place on the developer's desktop were avoided.
 **Observed.** In about 4 of 40 runs the process did not end after its
 window was closed. Logging added for this shows the window is destroyed and
 the framework reports "exit requested", but its final "exit" step never
-comes. Every thread is waiting, so it is a deadlock rather than slowness.
-It has only been seen in runs driven through the WebView2 debugging port,
-and after the window had been showing video.
+came. Every thread was waiting.
 
-**Not known.** The cause. Reading the stuck threads' stacks needs a
-debugger, which is not installed on the development machine.
+**Probable cause** (from reading the source; not caught in the act). The
+windowing library's loop (`tao` 0.37.2, `run_return`) tests its exit flag
+only after `GetMessageW` returns, that is, after a *posted* message. If the
+flag is set at a moment when nothing further is posted — likely once the
+window is gone — the loop waits forever with the flag already set.
+
+With WinDbg installed, the stall could not be reproduced: 0 in about 170
+further runs, so no stack of a stalled process was captured.
 
 **Done.**
 
+- After exit is requested, a few empty tasks are posted to the loop
+  (`wake_event_loop`), each one a message that makes it look at the flag.
 - Sharing and viewing stop when the window is destroyed, before the
-  framework's teardown. In the instrumented runs this ordering completed.
+  framework's teardown.
 - A watchdog ends the process if shutdown has not finished 5 s after the
-  window is destroyed. It was seen to fire once in six runs and the process
-  ended.
-- Close, destroy and exit requests are logged; the steps in between are
-  logged at debug level (`RC_LOG=debug`).
+  window is destroyed. Before the wake-ups were added it fired once in six
+  runs, and the process ended.
+- Close, destroy and exit requests are logged; the steps in between at
+  debug level (`RC_LOG=debug`).
 
-So the stall still happens, but can no longer leave a process sharing a
-screen or lingering beyond 5 seconds. This is containment, not a fix.
+**Result.** 25 closes in a row while sharing and viewing: 25 clean exits,
+the watchdog never fired. Since the stall had already stopped appearing
+before this change, that run shows no regression; it does not prove the
+wake-ups are what prevents the stall.
 
-**Also seen, unexplained.** A few times a close request sent by the test
+**Close request not acted on.** A few times a close request from the test
 harness (`Process.CloseMainWindow`) had no effect and a second one worked.
-Whether the harness failed to send it or the application dropped it was not
-established; it did not occur in the last five instrumented pair runs.
+One such instance was examined with the debugger: its main thread was idle
+in the message loop and healthy. The window handle the harness had used
+differed from the process's main window handle a few seconds later, which
+suggests the request went to another, short-lived window of the process
+and so points at the harness. 70 further attempts did not reproduce it, so
+which window that was is not known.
+
+## Tests that depend on the mouse being left alone
+
+`the_pointer_goes_where_the_viewer_points` and
+`input_works_only_while_the_host_allows_it` move the real pointer and read
+it back about 30 ms later. Run while someone was using the mouse, they
+failed with the pointer tens of pixels off, by a different amount each
+time; one of them passed on the next run with no change to the code. They
+are `#[ignore]`d on CI. Final local run: 79 passed, these 2 failed.
 
 ## Next milestone
 

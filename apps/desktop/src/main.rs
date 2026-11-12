@@ -30,6 +30,24 @@ fn stop_sessions(app: &AppHandle) {
     tracing::debug!("sessions stopped");
 }
 
+/// Posts a few empty tasks to the event loop after exit has been requested.
+///
+/// The windowing library's loop looks at its "exit" flag only after a posted
+/// message arrives (`tao`, `run_return`: the check follows `GetMessageW`).
+/// Once the window is gone there may be no further message, and the loop
+/// then waits forever with the flag already set. Each task here is one such
+/// message.
+fn wake_event_loop(app: AppHandle) {
+    thread::spawn(move || {
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(100));
+            if app.run_on_main_thread(|| {}).is_err() {
+                break;
+            }
+        }
+    });
+}
+
 fn main() {
     let (state, log_guard) = state::AppState::start();
     // Shared with the shutdown watchdog, which must be able to flush the log.
@@ -95,6 +113,7 @@ fn main() {
             tracing::info!("exit requested");
             start_watchdog();
             stop_sessions(handle);
+            wake_event_loop(handle.clone());
         }
         RunEvent::Exit => {
             stop_sessions(handle);
