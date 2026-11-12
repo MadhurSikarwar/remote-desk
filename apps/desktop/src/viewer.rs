@@ -12,7 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use rc_protocol::{read_message, write_message, Message, Role, PROTOCOL_VERSION};
+use rc_input::keymap::scancode_for;
+use rc_protocol::{
+    read_message, write_message, InputEvent, Message, MouseButton, Role, PROTOCOL_VERSION,
+};
+use serde::Deserialize;
 
 use crate::share::{lock, poll_messages, HANDSHAKE_TIMEOUT};
 
@@ -25,10 +29,78 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// - `FRAME`: u8 keyframe, u64 capture time (µs since the Unix epoch), then
 ///   the H.264 access unit
 /// - `ENDED`: UTF-8 reason
+/// - `PERMISSIONS`: u8 flags, bit 0 = the viewer may control input
 pub mod packet {
     pub const CONFIG: u8 = 1;
     pub const FRAME: u8 = 2;
     pub const ENDED: u8 = 3;
+    pub const PERMISSIONS: u8 = 4;
+}
+
+/// Mouse or keyboard input as the window reports it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ViewerInput {
+    /// `x`/`y` are fractions of the picture, 0.0 to 1.0.
+    Move { x: f64, y: f64 },
+    /// `button` is the browser's numbering: 0 left, 1 middle, 2 right.
+    Button {
+        button: u8,
+        down: bool,
+        x: f64,
+        y: f64,
+    },
+    /// Wheel movement in notches, positive away from the user / right.
+    Wheel { dx: f64, dy: f64 },
+    /// `code` is `KeyboardEvent.code`, the physical key.
+    Key { code: String, down: bool },
+}
+
+fn fraction(value: f64) -> u16 {
+    // A NaN stays NaN through `clamp` and becomes 0 in the cast.
+    (value.clamp(0.0, 1.0) * 65_535.0).round() as u16
+}
+
+fn notches(value: f64) -> i16 {
+    (value * 120.0)
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX))
+        .round() as i16
+}
+
+impl ViewerInput {
+    /// The wire event, or `None` for input that is not forwarded (an
+    /// unknown key or mouse button).
+    pub fn to_event(&self) -> Option<InputEvent> {
+        Some(match self {
+            Self::Move { x, y } => InputEvent::MouseMove {
+                x: fraction(*x),
+                y: fraction(*y),
+            },
+            Self::Button { button, down, x, y } => InputEvent::MouseButton {
+                button: match button {
+                    0 => MouseButton::Left,
+                    1 => MouseButton::Middle,
+                    2 => MouseButton::Right,
+                    _ => return None,
+                },
+                down: *down,
+                x: fraction(*x),
+                y: fraction(*y),
+            },
+            Self::Wheel { dx, dy } => InputEvent::MouseWheel {
+                dx: notches(*dx),
+                dy: notches(*dy),
+            },
+            Self::Key { code, down } => {
+                let (scancode, extended) = scancode_for(code)?;
+                InputEvent::Key {
+                    scancode,
+                    extended,
+                    down: *down,
+                }
+            }
+        })
+    }
 }
 
 fn ended(reason: &str) -> Vec<u8> {
@@ -61,7 +133,10 @@ fn to_packet(message: Message) -> Option<Vec<u8>> {
             Some(out)
         }
         Message::Bye { reason } => Some(ended(&reason)),
-        Message::Hello { .. } | Message::KeyframeRequest => None,
+        Message::Permissions(permissions) => {
+            Some(vec![packet::PERMISSIONS, u8::from(permissions.input)])
+        }
+        Message::Hello { .. } | Message::KeyframeRequest | Message::Input(_) => None,
     }
 }
 
@@ -170,6 +245,20 @@ impl ViewerController {
         }
     }
 
+    /// Sends mouse or keyboard input to the host. The host acts on it only
+    /// if it has allowed control. Input that is not forwarded is dropped
+    /// silently.
+    pub fn send_input(&self, input: &ViewerInput) -> Result<(), String> {
+        let Some(event) = input.to_event() else {
+            return Ok(());
+        };
+        match lock(&self.connection).as_ref() {
+            Some(connection) => write_message(&mut &connection.stream, &Message::Input(event))
+                .map_err(|e| e.to_string()),
+            None => Err("Not viewing a screen".to_owned()),
+        }
+    }
+
     /// Ends the session and waits for the reader thread, so the final
     /// `ENDED` packet has been delivered when this returns. Safe to call when
     /// not connected. Must not be called from the UI thread: delivering a
@@ -232,6 +321,73 @@ mod tests {
         });
         assert_eq!(bye.unwrap(), [3, b'o', b'k']);
         assert_eq!(to_packet(Message::KeyframeRequest), None);
+
+        let allowed = Message::Permissions(rc_protocol::Permissions { input: true });
+        assert_eq!(to_packet(allowed).unwrap(), [4, 1]);
+        let event = InputEvent::MouseMove { x: 1, y: 2 };
+        assert_eq!(to_packet(Message::Input(event)), None);
+    }
+
+    #[test]
+    fn window_input_is_parsed_and_converted() {
+        let parse = |json: &str| {
+            serde_json::from_str::<ViewerInput>(json)
+                .unwrap()
+                .to_event()
+        };
+
+        assert_eq!(
+            parse(r#"{"kind":"move","x":0.5,"y":1.0}"#),
+            Some(InputEvent::MouseMove { x: 32768, y: 65535 })
+        );
+        // Positions outside the picture are pulled to its edge.
+        assert_eq!(
+            parse(r#"{"kind":"button","button":2,"down":true,"x":-3.0,"y":7.5}"#),
+            Some(InputEvent::MouseButton {
+                button: MouseButton::Right,
+                down: true,
+                x: 0,
+                y: 65535
+            })
+        );
+        assert_eq!(
+            parse(r#"{"kind":"button","button":1,"down":false,"x":0,"y":0}"#),
+            Some(InputEvent::MouseButton {
+                button: MouseButton::Middle,
+                down: false,
+                x: 0,
+                y: 0
+            })
+        );
+        assert_eq!(
+            parse(r#"{"kind":"wheel","dx":0,"dy":-1.5}"#),
+            Some(InputEvent::MouseWheel { dx: 0, dy: -180 })
+        );
+        assert_eq!(
+            parse(r#"{"kind":"key","code":"ArrowLeft","down":true}"#),
+            Some(InputEvent::Key {
+                scancode: 0x4B,
+                extended: true,
+                down: true
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_keys_and_buttons_are_not_forwarded() {
+        let unknown_key = ViewerInput::Key {
+            code: "LaunchMail".into(),
+            down: true,
+        };
+        let fourth_button = ViewerInput::Button {
+            button: 3,
+            down: true,
+            x: 0.0,
+            y: 0.0,
+        };
+        assert_eq!(unknown_key.to_event(), None);
+        assert_eq!(fourth_button.to_event(), None);
+        assert!(serde_json::from_str::<ViewerInput>(r#"{"kind":"teleport"}"#).is_err());
     }
 
     #[test]
@@ -358,6 +514,7 @@ mod tests {
                 port: 0,
                 max_fps: 30,
                 bitrate_kbps: 4000,
+                allow_input: false,
             })
             .unwrap()
             .port

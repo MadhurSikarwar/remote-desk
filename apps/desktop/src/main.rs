@@ -22,9 +22,11 @@ fn main() {
             commands::start_share,
             commands::stop_share,
             commands::share_status,
+            commands::set_share_input,
             commands::view_connect,
             commands::view_request_keyframe,
-            commands::view_disconnect
+            commands::view_disconnect,
+            commands::view_send_input
         ])
         .on_window_event(|window, event| match event {
             WindowEvent::CloseRequested { .. } => {

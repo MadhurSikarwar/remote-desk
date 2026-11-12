@@ -2559,12 +2559,15 @@ dependencies = [
  "rc-capture",
  "rc-codec",
  "rc-core",
+ "rc-input",
  "rc-protocol",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tempfile",
  "tracing",
+ "windows",
 ]
 
 [[package]]

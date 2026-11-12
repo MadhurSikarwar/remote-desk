@@ -7,7 +7,7 @@ use tauri::State;
 
 use crate::share::{DisplaySummary, ShareController, ShareSettings, ShareStatus};
 use crate::state::{AppState, Status};
-use crate::viewer::ViewerController;
+use crate::viewer::{ViewerController, ViewerInput};
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -45,6 +45,7 @@ pub fn start_share(
         port: config.network.direct_port,
         max_fps: config.video.max_fps,
         bitrate_kbps: config.video.max_bitrate_kbps,
+        allow_input: config.security.allow_input,
     })?;
     // `display` cannot be used as a field name: the macro shadows it.
     let index = display;
@@ -60,6 +61,14 @@ pub fn start_share(
 pub fn stop_share(share: State<'_, ShareController>) -> ShareStatus {
     let status = share.stop();
     tracing::info!(frames = status.frames, "screen sharing stopped");
+    status
+}
+
+/// The host's own switch for letting the viewer control this computer.
+#[tauri::command]
+pub fn set_share_input(share: State<'_, ShareController>, allowed: bool) -> ShareStatus {
+    let status = share.set_input_allowed(allowed);
+    tracing::info!(allowed, "viewer control switched by the user");
     status
 }
 
@@ -89,4 +98,12 @@ pub fn view_request_keyframe(viewer: State<'_, ViewerController>) -> Result<(), 
 #[tauri::command(async)]
 pub fn view_disconnect(viewer: State<'_, ViewerController>) {
     viewer.disconnect();
+}
+
+#[tauri::command]
+pub fn view_send_input(
+    viewer: State<'_, ViewerController>,
+    input: ViewerInput,
+) -> Result<(), String> {
+    viewer.send_input(&input)
 }

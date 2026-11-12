@@ -19,7 +19,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rc_capture::{CaptureError, Capturer, DisplayInfo};
 use rc_codec::nv12::{bgra_to_nv12, even, nv12_len};
 use rc_codec::{EncoderConfig, H264Encoder};
-use rc_protocol::{read_message, write_message, Message, MessageDecoder, Role, PROTOCOL_VERSION};
+use rc_input::mapping::Rect;
+use rc_input::Injector;
+use rc_protocol::{
+    read_message, write_message, Message, MessageDecoder, Permissions, Role, PROTOCOL_VERSION,
+};
 use serde::Serialize;
 
 /// Wait for a screen change this long before checking the stop flag again.
@@ -43,6 +47,9 @@ pub struct ShareSettings {
     pub port: u16,
     pub max_fps: u32,
     pub bitrate_kbps: u32,
+    /// Whether a viewer may control mouse and keyboard when sharing starts.
+    /// The user can change it while sharing is on.
+    pub allow_input: bool,
 }
 
 #[derive(Default)]
@@ -56,6 +63,11 @@ struct Shared {
     /// True while the desktop cannot be captured (secure desktop).
     blocked: AtomicBool,
     error: Mutex<Option<String>>,
+    /// The host's switch: may the viewer control mouse and keyboard?
+    input_allowed: AtomicBool,
+    /// Input events acted on, and events ignored because input was off.
+    input_events: AtomicU64,
+    input_ignored: AtomicU64,
 }
 
 struct Worker {
@@ -78,6 +90,9 @@ impl Shared {
             seconds,
             blocked: self.blocked.load(Ordering::Relaxed),
             error: lock(&self.error).clone(),
+            input_allowed: active && self.input_allowed.load(Ordering::Relaxed),
+            input_events: self.input_events.load(Ordering::Relaxed),
+            input_ignored: self.input_ignored.load(Ordering::Relaxed),
         }
     }
 }
@@ -96,6 +111,12 @@ pub struct ShareStatus {
     /// The desktop is temporarily not capturable (lock screen, UAC prompt).
     pub blocked: bool,
     pub error: Option<String>,
+    /// The viewer may control mouse and keyboard.
+    pub input_allowed: bool,
+    /// Input events from the viewer that were carried out.
+    pub input_events: u64,
+    /// Input events discarded because control was not allowed.
+    pub input_ignored: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -233,7 +254,7 @@ fn now_micros() -> u64 {
 fn run_session(
     stream: &TcpStream,
     settings: ShareSettings,
-    shared: &Shared,
+    shared: &Arc<Shared>,
 ) -> Result<&'static str, String> {
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
     stream
@@ -241,6 +262,20 @@ fn run_session(
         .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)))
         .map_err(|e| e.to_string())?;
     host_handshake(&mut &*stream)?;
+    let display = rc_capture::list_displays()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .nth(settings.display)
+        .ok_or_else(|| format!("display {} does not exist", settings.display))?;
+    // Shared by the reader, which injects, and this thread, which makes it
+    // let go of everything when the host withdraws control.
+    let injector = Arc::new(Mutex::new(Injector::new(Rect {
+        x: display.x,
+        y: display.y,
+        width: display.width,
+        height: display.height,
+    })));
+
     // A second handle reads what the viewer sends while this thread writes.
     let closed = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
@@ -250,12 +285,28 @@ fn run_session(
         let closed = Arc::clone(&closed);
         let finished = Arc::clone(&finished);
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
+        let injector = Arc::clone(&injector);
+        let counters = Arc::clone(shared);
+        // The permission is checked for every single event, under the same
+        // lock the revocation takes, so nothing is injected after "off".
+        let input = move |event: &rc_protocol::InputEvent| {
+            let mut injector = lock(&injector);
+            if !counters.input_allowed.load(Ordering::Relaxed) {
+                counters.input_ignored.fetch_add(1, Ordering::Relaxed);
+            } else if injector.inject(event).is_ok() {
+                counters.input_events.fetch_add(1, Ordering::Relaxed);
+            }
+        };
         thread::Builder::new()
             .name("share-reader".into())
             .spawn(move || {
                 let _ = poll_messages(&stream, &finished, |message| match message {
                     Message::KeyframeRequest => {
                         keyframe_wanted.store(true, Ordering::Relaxed);
+                        ControlFlow::Continue(())
+                    }
+                    Message::Input(event) => {
+                        input(&event);
                         ControlFlow::Continue(())
                     }
                     Message::Bye { .. } => ControlFlow::Break(()),
@@ -266,7 +317,15 @@ fn run_session(
             .map_err(|e| e.to_string())?
     };
 
-    let result = stream_frames(stream, settings, shared, &closed, &keyframe_wanted);
+    let result = stream_frames(
+        stream,
+        settings,
+        shared,
+        &closed,
+        &keyframe_wanted,
+        &injector,
+    );
+    lock(&injector).release_all();
 
     let reason = match &result {
         Ok(reason) => (*reason).to_owned(),
@@ -285,11 +344,14 @@ fn stream_frames(
     shared: &Shared,
     closed: &AtomicBool,
     keyframe_wanted: &AtomicBool,
+    injector: &Mutex<Injector>,
 ) -> Result<&'static str, String> {
     let mut capturer = Capturer::new(settings.display).map_err(|e| e.to_string())?;
     let mut encoder: Option<H264Encoder> = None;
     let mut nv12 = Vec::new();
     let mut pacer = Pacer::new(settings.max_fps, Instant::now());
+    // What the viewer has been told; `None` until the first message.
+    let mut announced: Option<bool> = None;
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
@@ -297,6 +359,18 @@ fn stream_frames(
         }
         if closed.load(Ordering::Relaxed) {
             return Ok("viewer disconnected");
+        }
+
+        // Tell the viewer whenever the host's control switch changes, and
+        // drop whatever the viewer was holding when it is switched off.
+        let input = shared.input_allowed.load(Ordering::Relaxed);
+        if announced != Some(input) {
+            if !input {
+                lock(injector).release_all();
+            }
+            let message = Message::Permissions(Permissions { input });
+            write_message(&mut &*stream, &message).map_err(|e| e.to_string())?;
+            announced = Some(input);
         }
 
         let frame = match capturer.next_frame(POLL_MS) {
@@ -371,7 +445,7 @@ fn stream_frames(
     }
 }
 
-fn serve(listener: &TcpListener, settings: ShareSettings, shared: &Shared) {
+fn serve(listener: &TcpListener, settings: ShareSettings, shared: &Arc<Shared>) {
     while !shared.stop.load(Ordering::Relaxed) {
         let (stream, peer) = match listener.accept() {
             Ok(accepted) => accepted,
@@ -396,8 +470,14 @@ fn serve(listener: &TcpListener, settings: ShareSettings, shared: &Shared) {
         let outcome = run_session(&stream, settings, shared);
         shared.viewer_connected.store(false, Ordering::Relaxed);
         shared.blocked.store(false, Ordering::Relaxed);
+        let (input_events, input_ignored) = (
+            shared.input_events.load(Ordering::Relaxed),
+            shared.input_ignored.load(Ordering::Relaxed),
+        );
         match outcome {
-            Ok(reason) => tracing::info!(%peer, reason, "viewer session ended"),
+            Ok(reason) => {
+                tracing::info!(%peer, reason, input_events, input_ignored, "viewer session ended");
+            }
             Err(error) => {
                 tracing::warn!(%peer, %error, "viewer session failed");
                 *lock(&shared.error) = Some(error);
@@ -436,6 +516,9 @@ impl ShareController {
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         let shared = Arc::new(Shared::default());
+        shared
+            .input_allowed
+            .store(settings.allow_input, Ordering::Relaxed);
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("share".into())
@@ -467,6 +550,18 @@ impl ShareController {
         worker.shared.status(worker.port, seconds, false)
     }
 
+    /// Turns the viewer's mouse and keyboard control on or off. Takes
+    /// effect immediately, also for a viewer that is already connected.
+    pub fn set_input_allowed(&self, allowed: bool) -> ShareStatus {
+        if let Some(worker) = lock(&self.worker).as_ref() {
+            worker
+                .shared
+                .input_allowed
+                .store(allowed, Ordering::Relaxed);
+        }
+        self.status()
+    }
+
     pub fn status(&self) -> ShareStatus {
         match lock(&self.worker).as_ref() {
             Some(worker) => worker.shared.status(
@@ -485,6 +580,9 @@ impl ShareController {
                 seconds: 0.0,
                 blocked: false,
                 error: None,
+                input_allowed: false,
+                input_events: 0,
+                input_ignored: 0,
             },
         }
     }
@@ -550,6 +648,7 @@ mod tests {
             port: 0,
             max_fps: 30,
             bitrate_kbps: 4000,
+            allow_input: false,
         }
     }
 
@@ -668,6 +767,137 @@ mod tests {
         let took = before.elapsed();
         assert!(took < Duration::from_secs(2), "stop took {took:?}");
         drop(viewer);
+    }
+
+    /// Pointer position in physical pixels.
+    fn pointer() -> (i32, i32) {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::HiDpi::{
+            SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut point = POINT::default();
+        // SAFETY: the out-pointer references a live local; the DPI context
+        // change affects this test thread only.
+        unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            GetCursorPos(&mut point).unwrap();
+        }
+        (point.x, point.y)
+    }
+
+    fn shift_is_down() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
+        // SAFETY: plain call without pointers.
+        unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) < 0 }
+    }
+
+    /// Reads from the host until it announces permissions.
+    fn next_permissions(viewer: &mut TcpStream) -> bool {
+        loop {
+            if let Message::Permissions(permissions) = read_message(viewer).unwrap() {
+                return permissions.input;
+            }
+        }
+    }
+
+    fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "moves the real mouse pointer and presses Shift briefly"]
+    fn input_works_only_while_the_host_allows_it() {
+        use rc_protocol::InputEvent;
+
+        let display = rc_capture::list_displays().unwrap().remove(0);
+        let centre = (
+            display.x + display.width as i32 / 2,
+            display.y + display.height as i32 / 2,
+        );
+        let to_centre = Message::Input(InputEvent::MouseMove { x: 32768, y: 32768 });
+        let to_corner = Message::Input(InputEvent::MouseMove { x: 0, y: 0 });
+        let shift = |down| {
+            Message::Input(InputEvent::Key {
+                scancode: 0x2A,
+                extended: false,
+                down,
+            })
+        };
+        assert!(
+            !shift_is_down(),
+            "Shift is already held; cannot run this test"
+        );
+
+        let controller = ShareController::default();
+        let port = controller.start(settings()).unwrap().port.unwrap();
+        let mut viewer = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        viewer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        read_message(&mut viewer).unwrap();
+        let hello = Message::Hello {
+            version: PROTOCOL_VERSION,
+            role: Role::Viewer,
+        };
+        write_message(&mut viewer, &hello).unwrap();
+        let original = pointer();
+        // Park the pointer away from both targets so a move is detectable.
+        let parked = (centre.0 / 2, centre.1 / 2);
+        // SAFETY: plain call; the pointer is restored at the end.
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SetCursorPos(parked.0, parked.1).unwrap();
+        }
+        let parked = pointer();
+
+        // 1. Off by default: the viewer is told, and its input does nothing.
+        assert!(!next_permissions(&mut viewer));
+        write_message(&mut viewer, &to_centre).unwrap();
+        write_message(&mut viewer, &shift(true)).unwrap();
+        wait_until("ignored input", || controller.status().input_ignored == 2);
+        let while_off = (pointer(), shift_is_down(), controller.status().input_events);
+
+        // 2. The host allows control: the viewer is told, and input works.
+        assert!(controller.set_input_allowed(true).input_allowed);
+        assert!(next_permissions(&mut viewer));
+        write_message(&mut viewer, &to_centre).unwrap();
+        write_message(&mut viewer, &shift(true)).unwrap();
+        wait_until("accepted input", || controller.status().input_events == 2);
+        thread::sleep(Duration::from_millis(30));
+        let while_on = (pointer(), shift_is_down());
+
+        // 3. The host withdraws control: the held key is let go, and
+        //    further input does nothing.
+        assert!(!controller.set_input_allowed(false).input_allowed);
+        assert!(!next_permissions(&mut viewer));
+        thread::sleep(Duration::from_millis(30));
+        let shift_after_revoke = shift_is_down();
+        write_message(&mut viewer, &to_corner).unwrap();
+        wait_until("ignored input", || controller.status().input_ignored == 3);
+        let after_revoke = pointer();
+
+        controller.stop();
+        // SAFETY: plain call; puts the pointer back where the user had it.
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SetCursorPos(original.0, original.1).unwrap();
+        }
+
+        assert_eq!(while_off, (parked, false, 0), "input acted on while off");
+        let near = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1;
+        assert!(near(while_on.0, centre), "pointer at {:?}", while_on.0);
+        assert!(while_on.1, "Shift did not register while control was on");
+        assert!(
+            !shift_after_revoke,
+            "Shift stayed down after control was withdrawn"
+        );
+        assert!(
+            near(after_revoke, centre),
+            "pointer moved after control was withdrawn"
+        );
     }
 
     #[test]
