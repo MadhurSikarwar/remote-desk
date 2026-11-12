@@ -1,46 +1,46 @@
 //! Host side: shares this screen with one viewer.
 //!
 //! Sharing exists only between an explicit start and stop from the user.
-//! While it is on, a listener waits on the loopback interface; when a viewer
-//! connects, the screen is captured, encoded to H.264 and streamed until the
-//! viewer leaves or sharing stops.
+//! While it is on, a listener waits for a viewer. Each connection then goes
+//! through, in order:
 //!
-//! The listener binds to 127.0.0.1 only. The stream is not encrypted yet, so
-//! it must not be reachable from another machine.
+//! 1. an encrypted handshake in which both devices prove their keys;
+//! 2. greetings (protocol version, role, device name);
+//! 3. **approval by the person at this computer** — until they allow it,
+//!    nothing about the screen is captured or sent, and nothing the viewer
+//!    sends is acted on;
+//! 4. the session: screen out, and input in if separately allowed.
+//!
+//! The listener still binds to 127.0.0.1 only. Reaching other machines is
+//! the job of the connection milestones.
 
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rc_capture::{CaptureError, Capturer, DisplayInfo};
 use rc_codec::nv12::{bgra_to_nv12, even, nv12_len};
 use rc_codec::{EncoderConfig, H264Encoder};
+use rc_crypto::channel::Side;
 use rc_input::mapping::Rect;
 use rc_input::Injector;
-use rc_protocol::{
-    read_message, write_message, Message, MessageDecoder, Permissions, Role, PROTOCOL_VERSION,
-};
+use rc_protocol::{InputEvent, Message, Permissions, Role};
 use serde::Serialize;
+
+pub use crate::secure::lock;
+use crate::secure::{establish, exchange_hello, Peer, SecureWriter, Security};
 
 /// Wait for a screen change this long before checking the stop flag again.
 const POLL_MS: u32 = 100;
 /// Pause between attempts while the lock screen or a UAC prompt is showing.
 const BLOCKED_RETRY: Duration = Duration::from_millis(500);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How often a reader thread wakes up to check whether it should stop.
-const READ_POLL: Duration = Duration::from_millis(200);
+const APPROVAL_POLL: Duration = Duration::from_millis(100);
 
-pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareSettings {
     pub display: usize,
     /// Loopback port to listen on; 0 lets the OS choose.
@@ -50,6 +50,46 @@ pub struct ShareSettings {
     /// Whether a viewer may control mouse and keyboard when sharing starts.
     /// The user can change it while sharing is on.
     pub allow_input: bool,
+    /// The name this device gives to viewers.
+    pub device_name: String,
+    /// How long an approval prompt waits before the answer is "no".
+    pub approval_timeout: Duration,
+}
+
+/// A viewer waiting for the person at this computer to decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalRequest {
+    pub id: u64,
+    /// What the viewer calls itself. Not proof of anything.
+    pub name: String,
+    /// Fingerprint of the viewer's key, which the handshake did prove.
+    pub fingerprint: String,
+    /// Must match the code on the viewer's screen.
+    pub auth_code: String,
+    /// When this key was approved before (seconds since the Unix epoch),
+    /// if the user chose to remember it.
+    pub known_since: Option<u64>,
+    pub seconds_left: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Allow { remember: bool },
+    Deny,
+}
+
+struct Approval {
+    request: ApprovalRequest,
+    deadline: Instant,
+    decision: Option<Decision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Allowed { remember: bool },
+    Denied,
+    TimedOut,
+    Stopped,
 }
 
 #[derive(Default)]
@@ -68,17 +108,23 @@ struct Shared {
     /// Input events acted on, and events ignored because input was off.
     input_events: AtomicU64,
     input_ignored: AtomicU64,
-}
-
-struct Worker {
-    port: u16,
-    started: Instant,
-    shared: Arc<Shared>,
-    thread: JoinHandle<()>,
+    approval: Mutex<Option<Approval>>,
+    approval_changed: Condvar,
+    next_approval_id: AtomicU64,
 }
 
 impl Shared {
     fn status(&self, port: u16, seconds: f64, active: bool) -> ShareStatus {
+        let pending = lock(&self.approval)
+            .as_ref()
+            .filter(|a| active && a.decision.is_none())
+            .map(|a| ApprovalRequest {
+                seconds_left: a
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_secs(),
+                ..a.request.clone()
+            });
         ShareStatus {
             active,
             port: Some(port),
@@ -93,14 +139,64 @@ impl Shared {
             input_allowed: active && self.input_allowed.load(Ordering::Relaxed),
             input_events: self.input_events.load(Ordering::Relaxed),
             input_ignored: self.input_ignored.load(Ordering::Relaxed),
+            pending,
         }
     }
+
+    /// Puts a request in front of the user and waits for the answer, the
+    /// deadline, or the end of sharing — whichever comes first. The default
+    /// is always "no".
+    fn ask(&self, peer: &Peer, name: &str, known_since: Option<u64>, timeout: Duration) -> Verdict {
+        let id = self.next_approval_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let deadline = Instant::now() + timeout;
+        let mut slot = lock(&self.approval);
+        *slot = Some(Approval {
+            request: ApprovalRequest {
+                id,
+                name: name.to_owned(),
+                fingerprint: peer.fingerprint.clone(),
+                auth_code: peer.auth_code.clone(),
+                known_since,
+                seconds_left: timeout.as_secs(),
+            },
+            deadline,
+            decision: None,
+        });
+        let verdict = loop {
+            match slot.as_ref().and_then(|a| a.decision) {
+                Some(Decision::Allow { remember }) => break Verdict::Allowed { remember },
+                Some(Decision::Deny) => break Verdict::Denied,
+                None => {}
+            }
+            if self.stop.load(Ordering::Relaxed) {
+                break Verdict::Stopped;
+            }
+            if Instant::now() >= deadline {
+                break Verdict::TimedOut;
+            }
+            slot = self
+                .approval_changed
+                .wait_timeout(slot, APPROVAL_POLL)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        };
+        *slot = None;
+        verdict
+    }
+}
+
+struct Worker {
+    port: u16,
+    started: Instant,
+    shared: Arc<Shared>,
+    thread: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ShareStatus {
     pub active: bool,
     pub port: Option<u16>,
+    /// A viewer has been approved and is being sent the screen.
     pub viewer_connected: bool,
     pub width: u32,
     pub height: u32,
@@ -117,6 +213,8 @@ pub struct ShareStatus {
     pub input_events: u64,
     /// Input events discarded because control was not allowed.
     pub input_ignored: u64,
+    /// A viewer is waiting for the user's decision.
+    pub pending: Option<ApprovalRequest>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,94 +272,63 @@ impl Pacer {
     }
 }
 
-/// Host half of the handshake: announce ourselves, then require a viewer
-/// speaking the same protocol version.
-pub fn host_handshake<S: Read + Write>(stream: &mut S) -> Result<(), String> {
-    let hello = Message::Hello {
-        version: PROTOCOL_VERSION,
-        role: Role::Host,
-    };
-    write_message(stream, &hello).map_err(|e| e.to_string())?;
-    match read_message(stream).map_err(|e| e.to_string())? {
-        Message::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Viewer,
-        } => Ok(()),
-        Message::Hello { version, role } => {
-            let reason = format!("unsupported peer: protocol version {version}, role {role:?}");
-            let _ = write_message(
-                stream,
-                &Message::Bye {
-                    reason: reason.clone(),
-                },
-            );
-            Err(reason)
-        }
-        other => Err(format!("expected a greeting, got {other:?}")),
-    }
-}
-
-/// Reads messages from `stream` and passes them to `handle` until it breaks,
-/// the peer closes the connection, or `stop` is set.
-///
-/// The read wakes every [`READ_POLL`] to look at `stop`. A blocking read
-/// cannot be relied on to end when the socket is shut down from another
-/// thread: on Windows it stays blocked until the peer closes its side, which
-/// once left "Stop sharing" hanging for as long as the viewer stayed open.
-pub fn poll_messages(
-    stream: &TcpStream,
-    stop: &AtomicBool,
-    mut handle: impl FnMut(Message) -> ControlFlow<()>,
-) -> Result<(), String> {
-    stream
-        .set_read_timeout(Some(READ_POLL))
-        .map_err(|e| e.to_string())?;
-    let mut decoder = MessageDecoder::default();
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut reader = stream;
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-        match reader.read(&mut chunk) {
-            Ok(0) => return Ok(()),
-            Ok(n) => {
-                decoder.push(&chunk[..n]);
-                while let Some(message) = decoder.next_message().map_err(|e| e.to_string())? {
-                    if handle(message).is_break() {
-                        return Ok(());
-                    }
-                }
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) => {}
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-}
-
-fn now_micros() -> u64 {
+fn unix_time() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_micros() as u64)
+        .unwrap_or_default()
 }
 
-/// Streams the screen to one connected viewer until it leaves, sharing is
-/// stopped, or something fails.
+/// Handles one connection from handshake to goodbye.
 fn run_session(
     stream: &TcpStream,
-    settings: ShareSettings,
+    settings: &ShareSettings,
     shared: &Arc<Shared>,
+    security: &Security,
 ) -> Result<&'static str, String> {
-    stream.set_nodelay(true).map_err(|e| e.to_string())?;
-    stream
-        .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
-        .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)))
-        .map_err(|e| e.to_string())?;
-    host_handshake(&mut &*stream)?;
+    let (writer, mut reader, peer) = establish(stream, security.identity(), Side::Responder)?;
+    let name = exchange_hello(&writer, &mut reader, Role::Host, &settings.device_name)?;
+
+    // Nothing is captured, sent or accepted until the user says yes.
+    let known_since = security.trust().get(&peer.public).map(|d| d.approved_at);
+    tracing::info!(
+        name,
+        fingerprint = peer.fingerprint,
+        known = known_since.is_some(),
+        "viewer is asking to view the screen"
+    );
+    let verdict = shared.ask(&peer, &name, known_since, settings.approval_timeout);
+    tracing::info!(
+        name,
+        fingerprint = peer.fingerprint,
+        ?verdict,
+        "approval decided"
+    );
+    let refusal = match verdict {
+        Verdict::Allowed { remember } => {
+            if remember {
+                let saved = security
+                    .trust()
+                    .remember(&peer.public, &name, unix_time().as_secs());
+                if let Err(e) = saved {
+                    tracing::warn!(error = %e, "could not remember the device");
+                }
+            }
+            None
+        }
+        Verdict::Denied => Some("the host declined the request"),
+        Verdict::TimedOut => Some("the host did not answer"),
+        Verdict::Stopped => Some("sharing stopped"),
+    };
+    if let Some(reason) = refusal {
+        let _ = writer.send(&Message::Bye {
+            reason: reason.to_owned(),
+        });
+        writer.shutdown();
+        return Ok(reason);
+    }
+    writer.send(&Message::Accepted)?;
+    shared.viewer_connected.store(true, Ordering::Relaxed);
+
     let display = rc_capture::list_displays()
         .map_err(|e| e.to_string())?
         .into_iter()
@@ -276,12 +343,11 @@ fn run_session(
         height: display.height,
     })));
 
-    // A second handle reads what the viewer sends while this thread writes.
+    // A second thread reads what the viewer sends while this one writes.
     let closed = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
-    let reader = {
-        let stream = stream.try_clone().map_err(|e| e.to_string())?;
+    let reader_thread = {
         let closed = Arc::clone(&closed);
         let finished = Arc::clone(&finished);
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
@@ -289,7 +355,7 @@ fn run_session(
         let counters = Arc::clone(shared);
         // The permission is checked for every single event, under the same
         // lock the revocation takes, so nothing is injected after "off".
-        let input = move |event: &rc_protocol::InputEvent| {
+        let input = move |event: &InputEvent| {
             let mut injector = lock(&injector);
             if !counters.input_allowed.load(Ordering::Relaxed) {
                 counters.input_ignored.fetch_add(1, Ordering::Relaxed);
@@ -300,7 +366,7 @@ fn run_session(
         thread::Builder::new()
             .name("share-reader".into())
             .spawn(move || {
-                let _ = poll_messages(&stream, &finished, |message| match message {
+                let _ = reader.poll(&finished, |message| match message {
                     Message::KeyframeRequest => {
                         keyframe_wanted.store(true, Ordering::Relaxed);
                         ControlFlow::Continue(())
@@ -318,7 +384,7 @@ fn run_session(
     };
 
     let result = stream_frames(
-        stream,
+        &writer,
         settings,
         shared,
         &closed,
@@ -332,18 +398,18 @@ fn run_session(
         Ok(reason) => (*reason).to_owned(),
         Err(e) => e.clone(),
     };
-    let _ = write_message(&mut &*stream, &Message::Bye { reason });
+    let _ = writer.send(&Message::Bye { reason });
     finished.store(true, Ordering::Relaxed);
-    let _ = stream.shutdown(Shutdown::Both);
+    writer.shutdown();
     tracing::debug!("waiting for the session reader");
-    let _ = reader.join();
+    let _ = reader_thread.join();
     tracing::debug!("session reader finished");
     result
 }
 
 fn stream_frames(
-    stream: &TcpStream,
-    settings: ShareSettings,
+    writer: &SecureWriter,
+    settings: &ShareSettings,
     shared: &Shared,
     closed: &AtomicBool,
     keyframe_wanted: &AtomicBool,
@@ -371,8 +437,7 @@ fn stream_frames(
             if !input {
                 lock(injector).release_all();
             }
-            let message = Message::Permissions(Permissions { input });
-            write_message(&mut &*stream, &message).map_err(|e| e.to_string())?;
+            writer.send(&Message::Permissions(Permissions { input }))?;
             announced = Some(input);
         }
 
@@ -387,7 +452,7 @@ fn stream_frames(
             Err(e) => return Err(e.to_string()),
         };
         shared.blocked.store(false, Ordering::Relaxed);
-        let captured_at = now_micros();
+        let captured_at = unix_time().as_micros() as u64;
         let (width, height) = (even(frame.width), even(frame.height));
         if width == 0 || height == 0 {
             continue;
@@ -403,12 +468,11 @@ fn stream_frames(
         };
         if encoder.as_ref().map(H264Encoder::config) != Some(wanted) {
             encoder = Some(H264Encoder::new(wanted).map_err(|e| e.to_string())?);
-            let config = Message::VideoConfig {
+            writer.send(&Message::VideoConfig {
                 width,
                 height,
                 fps: settings.max_fps,
-            };
-            write_message(&mut &*stream, &config).map_err(|e| e.to_string())?;
+            })?;
             shared.width.store(width, Ordering::Relaxed);
             shared.height.store(height, Ordering::Relaxed);
         }
@@ -437,7 +501,7 @@ fn stream_frames(
                 timestamp_us: encoded.timestamp_us,
                 data: encoded.data,
             };
-            if write_message(&mut &*stream, &message).is_err() {
+            if writer.send(&message).is_err() {
                 return Ok("viewer disconnected");
             }
             shared.frames.fetch_add(1, Ordering::Relaxed);
@@ -448,7 +512,12 @@ fn stream_frames(
     }
 }
 
-fn serve(listener: &TcpListener, settings: ShareSettings, shared: &Arc<Shared>) {
+fn serve(
+    listener: &TcpListener,
+    settings: &ShareSettings,
+    shared: &Arc<Shared>,
+    security: &Security,
+) {
     while !shared.stop.load(Ordering::Relaxed) {
         let (stream, peer) = match listener.accept() {
             Ok(accepted) => accepted,
@@ -462,15 +531,13 @@ fn serve(listener: &TcpListener, settings: ShareSettings, shared: &Arc<Shared>) 
                 return;
             }
         };
-        // The listener is bound to loopback; this guards against that ever
-        // changing without encryption being in place.
+        // The listener is bound to loopback; this is a second check.
         if !peer.ip().is_loopback() || stream.set_nonblocking(false).is_err() {
             continue;
         }
 
-        tracing::info!(%peer, "viewer connected");
-        shared.viewer_connected.store(true, Ordering::Relaxed);
-        let outcome = run_session(&stream, settings, shared);
+        tracing::info!(%peer, "connection received");
+        let outcome = run_session(&stream, settings, shared, security);
         shared.viewer_connected.store(false, Ordering::Relaxed);
         shared.blocked.store(false, Ordering::Relaxed);
         let (input_events, input_ignored) = (
@@ -479,22 +546,30 @@ fn serve(listener: &TcpListener, settings: ShareSettings, shared: &Arc<Shared>) 
         );
         match outcome {
             Ok(reason) => {
-                tracing::info!(%peer, reason, input_events, input_ignored, "viewer session ended");
+                tracing::info!(%peer, reason, input_events, input_ignored, "connection ended");
             }
-            Err(error) => {
-                tracing::warn!(%peer, %error, "viewer session failed");
-                *lock(&shared.error) = Some(error);
-            }
+            // A connection that fails before it is approved is not the
+            // user's problem and is not shown as a sharing error.
+            Err(error) => tracing::warn!(%peer, %error, "connection failed"),
         }
     }
 }
 
-#[derive(Default)]
 pub struct ShareController {
+    security: Option<Arc<Security>>,
     worker: Mutex<Option<Worker>>,
 }
 
 impl ShareController {
+    /// `security` is `None` when this device's keys could not be loaded;
+    /// sharing is then refused.
+    pub fn new(security: Option<Arc<Security>>) -> Self {
+        Self {
+            security,
+            worker: Mutex::new(None),
+        }
+    }
+
     pub fn displays(&self) -> Result<Vec<DisplaySummary>, String> {
         rc_capture::list_displays()
             .map(|all| all.into_iter().map(Into::into).collect())
@@ -502,8 +577,12 @@ impl ShareController {
     }
 
     /// Starts sharing. Fails if sharing is already on, the display does not
-    /// exist, or the port cannot be opened.
+    /// exist, the port cannot be opened, or this device has no usable key.
     pub fn start(&self, settings: ShareSettings) -> Result<ShareStatus, String> {
+        let security = self
+            .security
+            .clone()
+            .ok_or("This device's key could not be loaded, so it cannot share")?;
         let mut slot = lock(&self.worker);
         if slot.as_ref().is_some_and(|w| !w.thread.is_finished()) {
             return Err("Screen sharing is already on".to_owned());
@@ -525,7 +604,7 @@ impl ShareController {
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("share".into())
-            .spawn(move || serve(&listener, settings, &thread_shared))
+            .spawn(move || serve(&listener, &settings, &thread_shared, &security))
             .map_err(|e| e.to_string())?;
 
         *slot = Some(Worker {
@@ -538,13 +617,14 @@ impl ShareController {
         Ok(self.status())
     }
 
-    /// Stops sharing, disconnecting any viewer. Safe to call when sharing is
-    /// off.
+    /// Stops sharing, disconnecting any viewer and refusing any pending
+    /// request. Safe to call when sharing is off.
     pub fn stop(&self) -> ShareStatus {
         let Some(worker) = lock(&self.worker).take() else {
             return self.status();
         };
         worker.shared.stop.store(true, Ordering::Relaxed);
+        worker.shared.approval_changed.notify_all();
         let seconds = worker.started.elapsed().as_secs_f64();
         tracing::debug!("waiting for the share thread");
         if worker.thread.join().is_err() {
@@ -552,6 +632,29 @@ impl ShareController {
         }
         // Report the totals of the run that just ended.
         worker.shared.status(worker.port, seconds, false)
+    }
+
+    /// Answers the approval request with this `id`. An answer for a request
+    /// that is no longer waiting (timed out, withdrawn, already answered)
+    /// is an error and changes nothing.
+    pub fn answer(&self, id: u64, allow: bool, remember: bool) -> Result<ShareStatus, String> {
+        if let Some(worker) = lock(&self.worker).as_ref() {
+            let mut slot = lock(&worker.shared.approval);
+            if let Some(approval) = slot
+                .as_mut()
+                .filter(|a| a.request.id == id && a.decision.is_none())
+            {
+                approval.decision = Some(if allow {
+                    Decision::Allow { remember }
+                } else {
+                    Decision::Deny
+                });
+                drop(slot);
+                worker.shared.approval_changed.notify_all();
+                return Ok(Self::status_of(worker));
+            }
+        }
+        Err("That request is no longer waiting for an answer".to_owned())
     }
 
     /// Turns the viewer's mouse and keyboard control on or off. Takes
@@ -566,13 +669,17 @@ impl ShareController {
         self.status()
     }
 
+    fn status_of(worker: &Worker) -> ShareStatus {
+        worker.shared.status(
+            worker.port,
+            worker.started.elapsed().as_secs_f64(),
+            !worker.thread.is_finished(),
+        )
+    }
+
     pub fn status(&self) -> ShareStatus {
         match lock(&self.worker).as_ref() {
-            Some(worker) => worker.shared.status(
-                worker.port,
-                worker.started.elapsed().as_secs_f64(),
-                !worker.thread.is_finished(),
-            ),
+            Some(worker) => Self::status_of(worker),
             None => ShareStatus {
                 active: false,
                 port: None,
@@ -587,6 +694,7 @@ impl ShareController {
                 input_allowed: false,
                 input_events: 0,
                 input_ignored: 0,
+                pending: None,
             },
         }
     }
@@ -594,343 +702,45 @@ impl ShareController {
 
 #[cfg(test)]
 pub mod test_support {
-    use std::io::{Cursor, Read, Write};
-    use std::sync::{Mutex, MutexGuard};
-
-    /// Tests that capture the screen or drive the real mouse and keyboard
-    /// share one desktop, so they take turns.
-    pub fn desktop() -> MutexGuard<'static, ()> {
-        static DESKTOP: Mutex<()> = Mutex::new(());
-        DESKTOP.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    use rc_protocol::{read_message, write_message, Message};
-
-    /// An in-memory connection: reads come from `input`, writes are kept.
-    pub struct Duplex {
-        pub input: Cursor<Vec<u8>>,
-        pub output: Vec<u8>,
-    }
-
-    impl Duplex {
-        pub fn with_incoming(messages: &[Message]) -> Self {
-            let mut input = Vec::new();
-            for message in messages {
-                write_message(&mut input, message).unwrap();
-            }
-            Self {
-                input: Cursor::new(input),
-                output: Vec::new(),
-            }
-        }
-
-        pub fn sent(&self) -> Vec<Message> {
-            let mut reader = self.output.as_slice();
-            std::iter::from_fn(|| read_message(&mut reader).ok()).collect()
-        }
-    }
-
-    impl Read for Duplex {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            self.input.read(buf)
-        }
-    }
-
-    impl Write for Duplex {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.output.write(buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::test_support::{desktop, Duplex};
     use super::*;
+    use crate::secure::SecureReader;
 
-    const MS: Duration = Duration::from_millis(1);
-
-    fn settings() -> ShareSettings {
+    pub fn settings() -> ShareSettings {
         ShareSettings {
             display: 0,
             port: 0,
             max_fps: 30,
             bitrate_kbps: 4000,
             allow_input: false,
+            device_name: "Test host".to_owned(),
+            approval_timeout: Duration::from_secs(10),
         }
     }
 
-    #[test]
-    fn pacer_waits_for_the_rest_of_the_interval() {
-        let start = Instant::now();
-        let mut pacer = Pacer::new(10, start);
-        assert_eq!(pacer.after_frame(start + 30 * MS), 70 * MS);
-    }
-
-    #[test]
-    fn pacer_makes_up_for_an_overslept_wait() {
-        let start = Instant::now();
-        let mut pacer = Pacer::new(10, start);
-        assert_eq!(pacer.after_frame(start), 100 * MS);
-        // The 100 ms sleep took 115 ms; the next wait is 15 ms shorter.
-        assert_eq!(pacer.after_frame(start + 115 * MS), 85 * MS);
-    }
-
-    #[test]
-    fn pacer_restarts_after_an_idle_gap_without_bursting() {
-        let start = Instant::now();
-        let mut pacer = Pacer::new(10, start);
-        assert_eq!(pacer.after_frame(start + 5000 * MS), Duration::ZERO);
-        assert_eq!(pacer.after_frame(start + 5000 * MS), 100 * MS);
-    }
-
-    #[test]
-    fn pacer_tolerates_zero_fps() {
-        let start = Instant::now();
-        assert_eq!(
-            Pacer::new(0, start).after_frame(start),
-            Duration::from_secs(1)
-        );
-    }
-
-    #[test]
-    fn host_handshake_accepts_a_matching_viewer() {
-        let mut peer = Duplex::with_incoming(&[Message::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Viewer,
-        }]);
-        host_handshake(&mut peer).unwrap();
-        assert_eq!(
-            peer.sent(),
-            [Message::Hello {
-                version: PROTOCOL_VERSION,
-                role: Role::Host
-            }]
-        );
-    }
-
-    #[test]
-    fn host_handshake_refuses_other_versions_roles_and_messages() {
-        for incoming in [
-            Message::Hello {
-                version: PROTOCOL_VERSION + 1,
-                role: Role::Viewer,
-            },
-            Message::Hello {
-                version: PROTOCOL_VERSION,
-                role: Role::Host,
-            },
-            Message::KeyframeRequest,
-        ] {
-            let mut peer = Duplex::with_incoming(std::slice::from_ref(&incoming));
-            assert!(host_handshake(&mut peer).is_err(), "{incoming:?}");
-        }
-        let mut silent = Duplex::with_incoming(&[]);
-        assert!(host_handshake(&mut silent).is_err());
-    }
-
-    #[test]
-    fn idle_controller_reports_inactive_and_stop_is_harmless() {
-        let controller = ShareController::default();
-        assert!(!controller.status().active);
-        assert!(!controller.stop().active);
-    }
-
-    #[test]
-    #[ignore = "needs an interactive desktop with a monitor"]
-    fn unknown_display_fails_to_start() {
-        let _desktop = desktop();
-        let controller = ShareController::default();
-        let error = controller
-            .start(ShareSettings {
-                display: usize::MAX,
-                ..settings()
-            })
-            .unwrap_err();
-        assert!(error.contains("does not exist"), "{error}");
-        assert!(!controller.status().active);
-    }
-
-    #[test]
-    #[ignore = "needs an interactive desktop with a monitor"]
-    fn stop_returns_promptly_while_a_silent_viewer_stays_connected() {
-        let _desktop = desktop();
-        let controller = ShareController::default();
-        let port = controller.start(settings()).unwrap().port.unwrap();
-
-        // A viewer that greets and then neither reads, writes nor closes.
-        let mut viewer = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-        read_message(&mut viewer).unwrap();
-        let hello = Message::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Viewer,
-        };
-        write_message(&mut viewer, &hello).unwrap();
+    pub fn wait_until(what: &str, condition: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !controller.status().viewer_connected {
-            assert!(Instant::now() < deadline, "viewer never registered");
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        let before = Instant::now();
-        assert!(!controller.stop().active);
-        let took = before.elapsed();
-        assert!(took < Duration::from_secs(2), "stop took {took:?}");
-        drop(viewer);
-    }
-
-    /// Pointer position in physical pixels.
-    fn pointer() -> (i32, i32) {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::UI::HiDpi::{
-            SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-        };
-        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-        let mut point = POINT::default();
-        // SAFETY: the out-pointer references a live local; the DPI context
-        // change affects this test thread only.
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            GetCursorPos(&mut point).unwrap();
-        }
-        (point.x, point.y)
-    }
-
-    fn shift_is_down() -> bool {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
-        // SAFETY: plain call without pointers.
-        unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) < 0 }
-    }
-
-    /// Reads from the host until it announces permissions.
-    fn next_permissions(viewer: &mut TcpStream, host: &ShareController) -> bool {
-        loop {
-            match read_message(viewer) {
-                Ok(Message::Permissions(permissions)) => return permissions.input,
-                Ok(_) => {}
-                Err(e) => panic!("{e}; host status: {:?}", host.status()),
-            }
-        }
-    }
-
-    fn wait_until(what: &str, condition: impl Fn() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(3);
         while !condition() {
             assert!(Instant::now() < deadline, "timed out waiting for {what}");
             thread::sleep(Duration::from_millis(10));
         }
     }
 
-    #[test]
-    #[ignore = "moves the real mouse pointer and presses Shift briefly"]
-    fn input_works_only_while_the_host_allows_it() {
-        let _desktop = desktop();
-        use rc_protocol::InputEvent;
-
-        let display = rc_capture::list_displays().unwrap().remove(0);
-        let centre = (
-            display.x + display.width as i32 / 2,
-            display.y + display.height as i32 / 2,
-        );
-        let to_centre = Message::Input(InputEvent::MouseMove { x: 32768, y: 32768 });
-        let to_corner = Message::Input(InputEvent::MouseMove { x: 0, y: 0 });
-        let shift = |down| {
-            Message::Input(InputEvent::Key {
-                scancode: 0x2A,
-                extended: false,
-                down,
-            })
-        };
-        assert!(
-            !shift_is_down(),
-            "Shift is already held; cannot run this test"
-        );
-
-        let controller = ShareController::default();
-        let port = controller.start(settings()).unwrap().port.unwrap();
-        let mut viewer = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-        viewer
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        read_message(&mut viewer).unwrap();
-        let hello = Message::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Viewer,
-        };
-        write_message(&mut viewer, &hello).unwrap();
-        let original = pointer();
-        // Park the pointer away from both targets so a move is detectable.
-        let parked = (centre.0 / 2, centre.1 / 2);
-        // SAFETY: plain call; the pointer is restored at the end.
-        unsafe {
-            windows::Win32::UI::WindowsAndMessaging::SetCursorPos(parked.0, parked.1).unwrap();
-        }
-        let parked = pointer();
-
-        // 1. Off by default: the viewer is told, and its input does nothing.
-        assert!(!next_permissions(&mut viewer, &controller));
-        write_message(&mut viewer, &to_centre).unwrap();
-        write_message(&mut viewer, &shift(true)).unwrap();
-        wait_until("ignored input", || controller.status().input_ignored == 2);
-        let while_off = (pointer(), shift_is_down(), controller.status().input_events);
-
-        // 2. The host allows control: the viewer is told, and input works.
-        assert!(controller.set_input_allowed(true).input_allowed);
-        assert!(next_permissions(&mut viewer, &controller));
-        write_message(&mut viewer, &to_centre).unwrap();
-        write_message(&mut viewer, &shift(true)).unwrap();
-        wait_until("accepted input", || controller.status().input_events == 2);
-        thread::sleep(Duration::from_millis(30));
-        let while_on = (pointer(), shift_is_down());
-
-        // 3. The host withdraws control: the held key is let go, and
-        //    further input does nothing.
-        assert!(!controller.set_input_allowed(false).input_allowed);
-        assert!(!next_permissions(&mut viewer, &controller));
-        thread::sleep(Duration::from_millis(30));
-        let shift_after_revoke = shift_is_down();
-        write_message(&mut viewer, &to_corner).unwrap();
-        wait_until("ignored input", || controller.status().input_ignored == 3);
-        let after_revoke = pointer();
-
-        controller.stop();
-        // SAFETY: plain call; puts the pointer back where the user had it.
-        unsafe {
-            windows::Win32::UI::WindowsAndMessaging::SetCursorPos(original.0, original.1).unwrap();
-        }
-
-        assert_eq!(while_off, (parked, false, 0), "input acted on while off");
-        let near = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1;
-        assert!(near(while_on.0, centre), "pointer at {:?}", while_on.0);
-        assert!(while_on.1, "Shift did not register while control was on");
-        assert!(
-            !shift_after_revoke,
-            "Shift stayed down after control was withdrawn"
-        );
-        assert!(
-            near(after_revoke, centre),
-            "pointer moved after control was withdrawn"
-        );
+    /// Waits for the host to show an approval request and returns it.
+    pub fn pending(host: &ShareController) -> ApprovalRequest {
+        wait_until("an approval request", || host.status().pending.is_some());
+        host.status().pending.expect("request disappeared")
     }
 
-    #[test]
-    #[ignore = "needs an interactive desktop with a monitor"]
-    fn sharing_listens_on_loopback_only_and_refuses_a_second_start() {
-        let _desktop = desktop();
-        let controller = ShareController::default();
-        let status = controller.start(settings()).unwrap();
-        let port = status.port.unwrap();
-        assert!(status.active && port != 0 && !status.viewer_connected);
-        assert!(controller.start(settings()).is_err());
-
-        // Reachable on loopback…
-        TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
-        // …and the port is released once sharing stops.
-        assert!(!controller.stop().active);
-        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
+    /// A viewer made of the raw pieces: connected, handshake and greeting
+    /// done, waiting for the host's decision.
+    pub fn knock(port: u16, security: &Security, name: &str) -> (SecureWriter, SecureReader, Peer) {
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let (writer, mut reader, peer) =
+            establish(&stream, security.identity(), Side::Initiator).unwrap();
+        exchange_hello(&writer, &mut reader, Role::Viewer, name).unwrap();
+        (writer, reader, peer)
     }
 }
+
+#[cfg(test)]
+mod tests;
