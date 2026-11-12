@@ -201,20 +201,14 @@ State of the machine [verified 2026-11-12]:
 | Git 2.53.0 | installed |
 | WebView2 runtime 157 | installed |
 | Docker | not installed (needed from milestone 7) |
-| Smart App Control | **enforced** |
+| Smart App Control | off (switched off by the owner on 2026-11-12) |
 
-Smart App Control blocks unsigned executables without cloud reputation. Cargo
-compiles and runs build scripts for many dependencies, and each one is blocked
+While Smart App Control was enforced, every Cargo build script was blocked
 [verified]: `An Application Control policy has blocked this file (os error
-4551)`. Local `cargo build` and `cargo test` therefore do not work on this
-machine; `cargo fmt` does. The finished application would be blocked the same
-way.
+4551)`. A machine with it enabled cannot build this project. CI
+(`.github/workflows/ci.yml`, `windows-latest`) runs format, lint and tests on
+every push independently of the local machine.
 
-Builds, lints and tests run on GitHub Actions (`windows-latest`) instead; see
-`.github/workflows/ci.yml`. Running the application needs a Windows machine
-without that restriction. Switching Smart App Control off is one-way (it can
-only be re-enabled by resetting Windows) and is the machine owner's decision.
-
-Second risk: the project lives under OneDrive. `target/` grows to several GB
+Risk: the project lives under OneDrive. `target/` grows to several GB
 and OneDrive will try to sync and lock those files. Either exclude the folder
 from sync or point `CARGO_TARGET_DIR` at a path outside OneDrive.
