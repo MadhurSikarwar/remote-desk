@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rc-core", "crates/rc-capture", "crates/rc-codec", "crates/rc-input", "crates/rc-protocol", "apps/desktop"]
+members = ["crates/rc-core", "crates/rc-capture", "crates/rc-codec", "crates/rc-crypto", "crates/rc-input", "crates/rc-protocol", "apps/desktop"]
 
 [workspace.package]
 version = "0.1.0"
