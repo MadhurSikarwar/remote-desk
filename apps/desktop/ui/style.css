@@ -100,6 +100,60 @@ p {
   border-radius: 6px;
 }
 
+.approval {
+  margin-top: 12px;
+  padding: 16px;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+}
+
+.approval h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.approval dl,
+#view-host {
+  margin-bottom: 12px;
+}
+
+.code {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 2px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+#remembered {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#remembered li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+#remembered button {
+  padding: 4px 12px;
+}
+
 .row > button {
   margin-bottom: 12px;
 }

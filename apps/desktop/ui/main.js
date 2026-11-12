@@ -71,6 +71,13 @@ async function showStatus() {
   document.getElementById("config-path").textContent = status.config_path ?? "unavailable";
   document.getElementById("log-dir").textContent = status.log_dir ?? "unavailable";
 
+  document.getElementById("fingerprint").textContent = status.fingerprint ?? "unavailable";
+  const securityBanner = document.getElementById("security-error");
+  securityBanner.hidden = !status.security_error;
+  securityBanner.textContent = status.security_error
+    ? `This device's key could not be loaded, so it cannot share or view. ${status.security_error}`
+    : "";
+
   const banner = document.getElementById("config-error");
   banner.hidden = !status.config_error;
   banner.textContent = status.config_error

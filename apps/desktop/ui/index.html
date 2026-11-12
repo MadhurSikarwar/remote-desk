@@ -16,6 +16,7 @@
     </header>
 
     <p id="config-error" class="banner error" hidden></p>
+    <p id="security-error" class="banner error" hidden></p>
 
     <main>
       <section>
@@ -25,15 +26,17 @@
           <dd id="config-path">–</dd>
           <dt>Log folder</dt>
           <dd id="log-dir">–</dd>
+          <dt>Device key</dt>
+          <dd id="fingerprint">–</dd>
         </dl>
       </section>
 
       <section>
         <h2>Share this screen</h2>
         <p class="muted">
-          Shares only with a viewer on this computer for now: the encrypted
-          connection between devices is not built yet. Sharing starts and
-          stops here and nowhere else.
+          Sharing starts and stops here and nowhere else, and every viewer
+          needs your permission each time. For now a viewer must be on this
+          computer; connecting across a network is the next step.
         </p>
         <div class="row">
           <label>Display
@@ -46,6 +49,30 @@
           Let the viewer control this computer's mouse and keyboard
         </label>
         <p id="share-stats" role="status"></p>
+        <div id="approval" class="approval" role="alertdialog" aria-labelledby="approval-title" hidden>
+          <h3 id="approval-title"></h3>
+          <dl>
+            <dt>Device key</dt>
+            <dd id="approval-fingerprint"></dd>
+            <dt>Seen before</dt>
+            <dd id="approval-known"></dd>
+            <dt>Code</dt>
+            <dd id="approval-code" class="code"></dd>
+          </dl>
+          <p class="muted">
+            Allow only if you expect this, and the other screen shows the same
+            code. A different code means someone may be in between.
+          </p>
+          <label class="check">
+            <input id="approval-remember" type="checkbox" />
+            Remember this device (you will still be asked every time)
+          </label>
+          <div class="actions">
+            <button id="approval-deny" type="button" class="secondary">Deny</button>
+            <button id="approval-allow" type="button">Allow</button>
+            <span id="approval-timer" class="muted"></span>
+          </div>
+        </div>
       </section>
 
       <section>
@@ -60,8 +87,26 @@
           <input id="view-control" type="checkbox" disabled />
           <span id="view-control-label">Control the shared screen</span>
         </label>
+        <dl id="view-host" hidden>
+          <dt>Connected to</dt>
+          <dd id="view-host-name"></dd>
+          <dt>Device key</dt>
+          <dd id="view-host-fingerprint"></dd>
+          <dt>Code</dt>
+          <dd id="view-host-code" class="code"></dd>
+        </dl>
         <p id="view-stats" role="status"></p>
         <canvas id="view-canvas" tabindex="0" hidden></canvas>
+      </section>
+
+      <section>
+        <h2>Remembered devices</h2>
+        <p class="muted">
+          Devices you allowed and chose to remember. Remembering does not let
+          a device in: it only tells you that you have seen its key before.
+        </p>
+        <p id="remembered-empty" class="muted">None.</p>
+        <ul id="remembered"></ul>
       </section>
 
       <form id="settings" novalidate>

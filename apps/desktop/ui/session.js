@@ -15,13 +15,81 @@
   const shareInput = $("share-input");
   let shareTimer = null;
 
+  // ---- Host: a viewer asking to be let in ---------------------------------
+
+  const approval = $("approval");
+  let shownRequest = null;
+
+  function showApproval(request) {
+    approval.hidden = !request;
+    if (!request) {
+      shownRequest = null;
+      return;
+    }
+    $("approval-timer").textContent = `Denied automatically in ${request.seconds_left} s`;
+    if (shownRequest === request.id) return;
+    shownRequest = request.id;
+    // Everything here comes from the other device; it is shown as text only.
+    $("approval-title").textContent = `"${request.name}" wants to view this screen`;
+    $("approval-fingerprint").textContent = request.fingerprint;
+    $("approval-known").textContent = request.known_since
+      ? `Yes — you allowed this key on ${new Date(request.known_since * 1000).toLocaleDateString()}`
+      : "No — this key is new to this device";
+    $("approval-code").textContent = request.auth_code;
+    $("approval-remember").checked = false;
+    approval.scrollIntoView({ block: "nearest" });
+  }
+
+  async function answerApproval(allow) {
+    if (shownRequest === null) return;
+    const remember = allow && $("approval-remember").checked;
+    try {
+      showShare(await invoke("answer_approval", { id: shownRequest, allow, remember }));
+      if (remember) showRemembered();
+    } catch (error) {
+      shareStats.textContent = message(error);
+      shareStats.classList.add("error");
+    }
+  }
+
+  $("approval-allow").addEventListener("click", () => answerApproval(true));
+  $("approval-deny").addEventListener("click", () => answerApproval(false));
+
+  // ---- Remembered devices --------------------------------------------------
+
+  async function showRemembered() {
+    const list = $("remembered");
+    const devices = await invoke("list_remembered");
+    $("remembered-empty").hidden = devices.length > 0;
+    list.replaceChildren(...devices.map((device) => {
+      const item = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent =
+        `${device.name} — ${device.fingerprint} — allowed ` +
+        new Date(device.approved_at * 1000).toLocaleDateString();
+      const forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "secondary";
+      forget.textContent = "Forget";
+      forget.addEventListener("click", async () => {
+        await invoke("forget_remembered", { fingerprint: device.fingerprint }).catch(() => {});
+        showRemembered();
+      });
+      item.append(label, forget);
+      return item;
+    }));
+  }
+
   function showShare(status) {
     const live = status.active && status.viewer_connected;
+    showApproval(status.pending);
     pill.textContent = live
       ? status.input_allowed ? "Sharing screen — viewer has control" : "Sharing screen"
-      : status.active
-        ? "Sharing on — no viewer"
-        : "Not sharing";
+      : status.pending
+        ? "A viewer is waiting for your answer"
+        : status.active
+          ? "Sharing on — no viewer"
+          : "Not sharing";
     pill.classList.toggle("live", live);
     pill.classList.toggle("armed", status.active && !live);
 
@@ -50,7 +118,8 @@
       viewPort.value = status.port;
     }
     if (status.active && shareTimer === null) {
-      shareTimer = setInterval(async () => showShare(await invoke("share_status")), 1000);
+      // Twice a second, so a viewer's request appears promptly.
+      shareTimer = setInterval(async () => showShare(await invoke("share_status")), 500);
     } else if (!status.active && shareTimer !== null) {
       clearInterval(shareTimer);
       shareTimer = null;
@@ -91,7 +160,7 @@
   const viewControl = $("view-control");
   const viewControlLabel = $("view-control-label");
 
-  const PACKET = { CONFIG: 1, FRAME: 2, ENDED: 3, PERMISSIONS: 4 };
+  const PACKET = { CONFIG: 1, FRAME: 2, ENDED: 3, PERMISSIONS: 4, ACCEPTED: 5 };
   // H.264 Main profile, level 4.0. With no `description` the decoder expects
   // the Annex B stream the host sends.
   const CODEC = "avc1.4d0028";
@@ -166,6 +235,9 @@
         timestamp: Number(view.getBigUint64(2, true)),
         data: bytes.subarray(10),
       }));
+    } else if (bytes[0] === PACKET.ACCEPTED) {
+      viewStats.textContent = "Allowed. Waiting for the first picture…";
+      statsTimer = setInterval(showViewStats, 1000);
     } else if (bytes[0] === PACKET.PERMISSIONS) {
       setHostAllowsControl((bytes[1] & 1) === 1);
     } else if (bytes[0] === PACKET.ENDED) {
@@ -289,10 +361,12 @@
     if (!viewing) return;
     viewing = false;
     clearInterval(statsTimer);
+    statsTimer = null;
     decoder?.close();
     decoder = null;
     viewToggle.textContent = "Connect";
     viewPort.disabled = false;
+    $("view-host").hidden = true;
     setHostAllowsControl(false);
     viewStats.classList.remove("error");
     viewStats.textContent = `Ended: ${reason}. ${totals.drawn} frames shown.`;
@@ -313,17 +387,27 @@
         const packets = new Channel();
         packets.onmessage = onPacket;
         viewing = true;
+        let host;
         try {
-          await invoke("view_connect", { port, packets });
+          host = await invoke("view_connect", { port, packets });
         } catch (error) {
           viewing = false;
           throw error;
         }
         viewToggle.textContent = "Disconnect";
         viewPort.disabled = true;
+        // Shown as text only: the name is whatever the other device says.
+        $("view-host-name").textContent = host.name;
+        $("view-host-fingerprint").textContent = host.fingerprint;
+        $("view-host-code").textContent = host.auth_code;
+        $("view-host").hidden = false;
         viewStats.classList.remove("error");
-        viewStats.textContent = "Connected. Waiting for the first picture…";
-        statsTimer = setInterval(showViewStats, 1000);
+        // The host may already have answered while this call returned.
+        if (viewing && statsTimer === null) {
+          viewStats.textContent =
+            "Waiting for the person at the other device to allow it. " +
+            "Their screen must show the same code.";
+        }
       }
     } catch (error) {
       viewStats.textContent = message(error);
@@ -341,6 +425,7 @@
       }
       shareToggle.disabled = shareDisplay.options.length === 0;
       showShare(await invoke("share_status"));
+      await showRemembered();
     } catch (error) {
       shareStats.textContent = message(error);
       shareStats.classList.add("error");
