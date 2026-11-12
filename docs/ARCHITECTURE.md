@@ -191,32 +191,29 @@ milestone that needs them. PostgreSQL is **not** planned: the server's state
 
 ## 5. Development environment
 
-Found on the machine [verified 2026-11-11]:
+State of the machine [verified 2026-11-12]:
 
 | Tool | State |
 |---|---|
-| Rust (`rustc`, `cargo`, `rustup`) | **not installed** |
-| MSVC build tools / Windows SDK | **not installed** (`vswhere` absent, no `Windows Kits\10\Lib`) |
+| Rust 1.99.1 via rustup (`x86_64-pc-windows-msvc`) | installed |
+| Visual Studio 2022 Build Tools 17.14, MSVC 14.44, Windows SDK 10.0.26100 | installed |
 | Node 24.14.0, npm 11.9.0, pnpm | installed |
 | Git 2.53.0 | installed |
 | WebView2 runtime 157 | installed |
 | Docker | not installed (needed from milestone 7) |
 | Smart App Control | **enforced** |
 
-Required before anything compiles:
+Smart App Control blocks unsigned executables without cloud reputation. Cargo
+compiles and runs build scripts for many dependencies, and each one is blocked
+[verified]: `An Application Control policy has blocked this file (os error
+4551)`. Local `cargo build` and `cargo test` therefore do not work on this
+machine; `cargo fmt` does. The finished application would be blocked the same
+way.
 
-1. Visual Studio 2022 Build Tools with "Desktop development with C++"
-   (MSVC + Windows 11 SDK). Needs administrator rights.
-2. Rust stable via `rustup` (`x86_64-pc-windows-msvc`). Per-user; adds
-   `%USERPROFILE%\.cargo\bin` to the user `PATH`.
-
-Risk: Smart App Control blocks unsigned executables without cloud reputation.
-A Rust build produces and runs many such files (build scripts, test binaries,
-the application itself), so builds may fail on this machine with
-"An Application Control policy has blocked this file". This is a hypothesis
-until a build is attempted; it is known to affect Rust development under SAC.
-Switching SAC off is a one-way Windows security setting and is the machine
-owner's decision.
+Builds, lints and tests run on GitHub Actions (`windows-latest`) instead; see
+`.github/workflows/ci.yml`. Running the application needs a Windows machine
+without that restriction. Switching Smart App Control off is one-way (it can
+only be re-enabled by resetting Windows) and is the machine owner's decision.
 
 Second risk: the project lives under OneDrive. `target/` grows to several GB
 and OneDrive will try to sync and lock those files. Either exclude the folder
