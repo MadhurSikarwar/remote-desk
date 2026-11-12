@@ -73,7 +73,7 @@ string scan proves presence of text, not that a code path is used.
 | RustDesk | This project | Reason |
 |---|---|---|
 | Custom box/secretbox handshake | Noise protocol (`snow`), mutual static keys | Reviewed, formally analysed handshake instead of a bespoke one; forward secrecy |
-| Salted password + challenge hash | PAKE-based pairing code, then pinned device keys | A captured exchange cannot be brute-forced offline |
+| Salted password + challenge hash | Approval at the host for every session, a code both people compare, remembered device keys (see `MILESTONE-5.md`) | No password to capture or brute-force; consent is explicit |
 | KCP + TCP + WebRTC + WebSocket | QUIC (`quinn`) for direct paths, TLS/WebSocket on 443 for relay | Two transports cover the same ground with far less code |
 | FFmpeg hardware encoders + libvpx | Media Foundation H.264 (hardware when present), software fallback | No bundled GPL/LGPL codec binaries; ships with Windows |
 | Flutter | Tauri 2 + WebView2 | Requested stack; small installer; WebCodecs gives hardware decode |
@@ -125,8 +125,9 @@ Created only when their milestone starts; nothing is stubbed in advance.
 - **Identity.** Each device owns an Ed25519 key generated on first run and
   protected with Windows DPAPI. The device ID is derived from the public key,
   so the server cannot assign one device's ID to another.
-- **Pairing.** First contact uses a short one-time code confirmed through a
-  PAKE; after that the peer's key is pinned and a changed key is refused.
+- **Pairing.** Both screens show a short code derived from the handshake;
+  the host's user compares it and allows or denies. An allowed key can be
+  remembered, which changes what the prompt says, not whether it appears.
 - **Audit.** Connection attempts, approvals, permission changes and
   disconnects are appended to a local log.
 - **No secrets in config.** `config.toml` holds settings only.
