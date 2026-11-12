@@ -1,24 +1,23 @@
 //! Viewer side: connects to a host and forwards its video to the window,
 //! which decodes and draws it.
 //!
-//! Like the host side, this only ever connects to 127.0.0.1 until the
-//! encrypted channel exists.
+//! Every connection starts with an encrypted handshake; the session itself
+//! begins only once the person at the host has allowed it. Connections
+//! still go to 127.0.0.1 only.
 
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use rc_crypto::channel::Side;
 use rc_input::keymap::scancode_for;
-use rc_protocol::{
-    read_message, write_message, InputEvent, Message, MouseButton, Role, PROTOCOL_VERSION,
-};
-use serde::Deserialize;
+use rc_protocol::{InputEvent, Message, MouseButton, Role};
+use serde::{Deserialize, Serialize};
 
-use crate::share::{lock, poll_messages, HANDSHAKE_TIMEOUT};
+use crate::secure::{establish, exchange_hello, lock, SecureWriter, Security};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -30,7 +29,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 ///   the H.264 access unit
 /// - `ENDED`: UTF-8 reason
 /// - `PERMISSIONS`: u8 flags, bit 0 = the viewer may control input
+/// - `ACCEPTED`: nothing; the host allowed the session
 pub mod packet {
+    pub const ACCEPTED: u8 = 5;
     pub const CONFIG: u8 = 1;
     pub const FRAME: u8 = 2;
     pub const ENDED: u8 = 3;
@@ -136,50 +137,56 @@ fn to_packet(message: Message) -> Option<Vec<u8>> {
         Message::Permissions(permissions) => {
             Some(vec![packet::PERMISSIONS, u8::from(permissions.input)])
         }
+        Message::Accepted => Some(vec![packet::ACCEPTED]),
         Message::Hello { .. } | Message::KeyframeRequest | Message::Input(_) => None,
     }
 }
 
-/// Viewer half of the handshake: require a host speaking the same protocol
-/// version, then announce ourselves.
-pub fn viewer_handshake<S: Read + Write>(stream: &mut S) -> Result<(), String> {
-    match read_message(stream).map_err(|e| e.to_string())? {
-        Message::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Host,
-        } => {}
-        Message::Hello { version, role } => {
-            return Err(format!(
-                "unsupported peer: protocol version {version}, role {role:?}"
-            ));
-        }
-        other => return Err(format!("expected a greeting, got {other:?}")),
-    }
-    let hello = Message::Hello {
-        version: PROTOCOL_VERSION,
-        role: Role::Viewer,
-    };
-    write_message(stream, &hello).map_err(|e| e.to_string())
+/// The host a viewer has reached, for the person to check before the host
+/// decides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostInfo {
+    /// What the host calls itself. Not proof of anything.
+    pub name: String,
+    /// Fingerprint of the host's key, which the handshake proved.
+    pub fingerprint: String,
+    /// Must match the code on the host's screen.
+    pub auth_code: String,
 }
 
 struct Connection {
-    stream: TcpStream,
+    writer: Arc<SecureWriter>,
     closing: Arc<AtomicBool>,
     thread: JoinHandle<()>,
 }
 
-#[derive(Default)]
 pub struct ViewerController {
+    security: Option<Arc<Security>>,
     connection: Mutex<Option<Connection>>,
 }
 
 impl ViewerController {
-    /// Connects to a host on this computer and starts delivering packets to
-    /// `sink` from a background thread. The last packet is always `ENDED`.
-    pub fn connect<F>(&self, port: u16, sink: F) -> Result<(), String>
+    /// `security` is `None` when this device's keys could not be loaded;
+    /// connecting is then refused.
+    pub fn new(security: Option<Arc<Security>>) -> Self {
+        Self {
+            security,
+            connection: Mutex::new(None),
+        }
+    }
+
+    /// Connects to a host on this computer, completes the encrypted
+    /// handshake and returns who answered. Packets then arrive on `sink`
+    /// from a background thread: `ACCEPTED` once the host allows the
+    /// session, and always `ENDED` last.
+    pub fn connect<F>(&self, port: u16, device_name: &str, sink: F) -> Result<HostInfo, String>
     where
         F: Fn(Vec<u8>) + Send + 'static,
     {
+        let security = self
+            .security
+            .clone()
+            .ok_or("This device's key could not be loaded, so it cannot connect")?;
         let mut slot = lock(&self.connection);
         if slot.as_ref().is_some_and(|c| !c.thread.is_finished()) {
             return Err("Already viewing a screen".to_owned());
@@ -188,20 +195,26 @@ impl ViewerController {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
             .map_err(|e| format!("cannot connect to port {port}: {e}"))?;
-        stream
-            .set_nodelay(true)
-            .and_then(|()| stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)))
-            .map_err(|e| e.to_string())?;
-        viewer_handshake(&mut &stream)?;
+        let (writer, mut reader, peer) =
+            establish(&stream, security.identity(), Side::Initiator)
+                .map_err(|e| format!("could not set up a secure connection: {e}"))?;
+        let name = exchange_hello(&writer, &mut reader, Role::Viewer, device_name)?;
+        let host = HostInfo {
+            name,
+            fingerprint: peer.fingerprint,
+            auth_code: peer.auth_code,
+        };
+
+        let writer = Arc::new(writer);
         let closing = Arc::new(AtomicBool::new(false));
         let thread = {
-            let stream = stream.try_clone().map_err(|e| e.to_string())?;
+            let writer = Arc::clone(&writer);
             let closing = Arc::clone(&closing);
             thread::Builder::new()
                 .name("viewer".into())
                 .spawn(move || {
                     let mut goodbye = None;
-                    let outcome = poll_messages(&stream, &closing, |message| match message {
+                    let outcome = reader.poll(&closing, |message| match message {
                         Message::Bye { reason } => {
                             goodbye = Some(reason);
                             ControlFlow::Break(())
@@ -220,42 +233,46 @@ impl ViewerController {
                         (None, Err(e)) => format!("connection lost: {e}"),
                     };
                     // Close our side so the host is not left waiting on it.
-                    let _ = stream.shutdown(Shutdown::Both);
+                    writer.shutdown();
                     tracing::info!(reason, "viewing ended");
                     sink(ended(&reason));
                 })
                 .map_err(|e| e.to_string())?
         };
 
-        tracing::info!(port, "viewing started");
+        tracing::info!(
+            port,
+            host = host.name,
+            fingerprint = host.fingerprint,
+            "connected; waiting for the host to allow viewing"
+        );
         *slot = Some(Connection {
-            stream,
+            writer,
             closing,
             thread,
         });
-        Ok(())
+        Ok(host)
+    }
+
+    fn send(&self, message: &Message) -> Result<(), String> {
+        match lock(&self.connection).as_ref() {
+            Some(connection) => connection.writer.send(message),
+            None => Err("Not viewing a screen".to_owned()),
+        }
     }
 
     /// Asks the host for a fresh keyframe after a decoding problem.
     pub fn request_keyframe(&self) -> Result<(), String> {
-        match lock(&self.connection).as_ref() {
-            Some(connection) => write_message(&mut &connection.stream, &Message::KeyframeRequest)
-                .map_err(|e| e.to_string()),
-            None => Err("Not viewing a screen".to_owned()),
-        }
+        self.send(&Message::KeyframeRequest)
     }
 
     /// Sends mouse or keyboard input to the host. The host acts on it only
     /// if it has allowed control. Input that is not forwarded is dropped
     /// silently.
     pub fn send_input(&self, input: &ViewerInput) -> Result<(), String> {
-        let Some(event) = input.to_event() else {
-            return Ok(());
-        };
-        match lock(&self.connection).as_ref() {
-            Some(connection) => write_message(&mut &connection.stream, &Message::Input(event))
-                .map_err(|e| e.to_string()),
-            None => Err("Not viewing a screen".to_owned()),
+        match input.to_event() {
+            Some(event) => self.send(&Message::Input(event)),
+            None => Ok(()),
         }
     }
 
@@ -280,287 +297,13 @@ impl ViewerController {
     fn close(&self) -> Option<JoinHandle<()>> {
         let connection = lock(&self.connection).take()?;
         connection.closing.store(true, Ordering::Relaxed);
-        let bye = Message::Bye {
+        let _ = connection.writer.send(&Message::Bye {
             reason: "viewer disconnected".to_owned(),
-        };
-        let _ = write_message(&mut &connection.stream, &bye);
-        let _ = connection.stream.shutdown(Shutdown::Both);
+        });
+        connection.writer.shutdown();
         Some(connection.thread)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::mpsc;
-
-    use super::*;
-    use crate::share::test_support::{desktop, Duplex};
-    use crate::share::{ShareController, ShareSettings};
-
-    #[test]
-    fn packets_have_the_documented_layout() {
-        let config = to_packet(Message::VideoConfig {
-            width: 1920,
-            height: 1080,
-            fps: 30,
-        });
-        assert_eq!(
-            config.unwrap(),
-            [1, 0x80, 7, 0, 0, 0x38, 4, 0, 0, 30, 0, 0, 0]
-        );
-
-        let frame = to_packet(Message::VideoFrame {
-            keyframe: true,
-            timestamp_us: 0x0102_0304_0506_0708,
-            data: vec![0xAA, 0xBB],
-        });
-        assert_eq!(frame.unwrap(), [2, 1, 8, 7, 6, 5, 4, 3, 2, 1, 0xAA, 0xBB]);
-
-        let bye = to_packet(Message::Bye {
-            reason: "ok".into(),
-        });
-        assert_eq!(bye.unwrap(), [3, b'o', b'k']);
-        assert_eq!(to_packet(Message::KeyframeRequest), None);
-
-        let allowed = Message::Permissions(rc_protocol::Permissions { input: true });
-        assert_eq!(to_packet(allowed).unwrap(), [4, 1]);
-        let event = InputEvent::MouseMove { x: 1, y: 2 };
-        assert_eq!(to_packet(Message::Input(event)), None);
-    }
-
-    #[test]
-    fn window_input_is_parsed_and_converted() {
-        let parse = |json: &str| {
-            serde_json::from_str::<ViewerInput>(json)
-                .unwrap()
-                .to_event()
-        };
-
-        assert_eq!(
-            parse(r#"{"kind":"move","x":0.5,"y":1.0}"#),
-            Some(InputEvent::MouseMove { x: 32768, y: 65535 })
-        );
-        // Positions outside the picture are pulled to its edge.
-        assert_eq!(
-            parse(r#"{"kind":"button","button":2,"down":true,"x":-3.0,"y":7.5}"#),
-            Some(InputEvent::MouseButton {
-                button: MouseButton::Right,
-                down: true,
-                x: 0,
-                y: 65535
-            })
-        );
-        assert_eq!(
-            parse(r#"{"kind":"button","button":1,"down":false,"x":0,"y":0}"#),
-            Some(InputEvent::MouseButton {
-                button: MouseButton::Middle,
-                down: false,
-                x: 0,
-                y: 0
-            })
-        );
-        assert_eq!(
-            parse(r#"{"kind":"wheel","dx":0,"dy":-1.5}"#),
-            Some(InputEvent::MouseWheel { dx: 0, dy: -180 })
-        );
-        assert_eq!(
-            parse(r#"{"kind":"key","code":"ArrowLeft","down":true}"#),
-            Some(InputEvent::Key {
-                scancode: 0x4B,
-                extended: true,
-                down: true
-            })
-        );
-    }
-
-    #[test]
-    fn unknown_keys_and_buttons_are_not_forwarded() {
-        let unknown_key = ViewerInput::Key {
-            code: "LaunchMail".into(),
-            down: true,
-        };
-        let fourth_button = ViewerInput::Button {
-            button: 3,
-            down: true,
-            x: 0.0,
-            y: 0.0,
-        };
-        assert_eq!(unknown_key.to_event(), None);
-        assert_eq!(fourth_button.to_event(), None);
-        assert!(serde_json::from_str::<ViewerInput>(r#"{"kind":"teleport"}"#).is_err());
-    }
-
-    #[test]
-    fn viewer_handshake_accepts_a_matching_host() {
-        let mut peer = Duplex::with_incoming(&[Message::Hello {
-            version: PROTOCOL_VERSION,
-            role: Role::Host,
-        }]);
-        viewer_handshake(&mut peer).unwrap();
-        assert_eq!(
-            peer.sent(),
-            [Message::Hello {
-                version: PROTOCOL_VERSION,
-                role: Role::Viewer
-            }]
-        );
-    }
-
-    #[test]
-    fn viewer_handshake_refuses_other_versions_roles_and_messages() {
-        for incoming in [
-            Message::Hello {
-                version: PROTOCOL_VERSION + 1,
-                role: Role::Host,
-            },
-            Message::Hello {
-                version: PROTOCOL_VERSION,
-                role: Role::Viewer,
-            },
-            Message::VideoConfig {
-                width: 2,
-                height: 2,
-                fps: 1,
-            },
-        ] {
-            let mut peer = Duplex::with_incoming(std::slice::from_ref(&incoming));
-            assert!(viewer_handshake(&mut peer).is_err(), "{incoming:?}");
-            assert!(peer.sent().is_empty(), "replied to {incoming:?}");
-        }
-    }
-
-    #[test]
-    fn connecting_to_a_closed_port_fails_and_disconnect_is_harmless() {
-        let viewer = ViewerController::default();
-        // Port 1 on loopback has no listener.
-        assert!(viewer.connect(1, |_| {}).is_err());
-        assert!(viewer.request_keyframe().is_err());
-        viewer.disconnect();
-    }
-
-    /// A host that completes the handshake, runs `after`, and then keeps the
-    /// connection open without doing anything else.
-    fn fake_host(
-        after: impl FnOnce(&mut TcpStream) + Send + 'static,
-    ) -> (u16, mpsc::Receiver<TcpStream>) {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let hello = Message::Hello {
-                version: PROTOCOL_VERSION,
-                role: Role::Host,
-            };
-            write_message(&mut stream, &hello).unwrap();
-            read_message(&mut stream).unwrap();
-            after(&mut stream);
-            let _ = tx.send(stream);
-        });
-        (port, rx)
-    }
-
-    #[test]
-    fn disconnect_returns_promptly_from_a_silent_host() {
-        let (port, host_side) = fake_host(|_| {});
-        let (tx, rx) = mpsc::channel();
-        let viewer = ViewerController::default();
-        viewer
-            .connect(port, move |packet| {
-                let _ = tx.send(packet);
-            })
-            .unwrap();
-        let _host_stream = host_side.recv_timeout(Duration::from_secs(5)).unwrap();
-
-        let before = std::time::Instant::now();
-        viewer.disconnect();
-        let took = before.elapsed();
-        assert!(took < Duration::from_secs(2), "disconnect took {took:?}");
-        assert_eq!(rx.iter().last().unwrap(), ended("disconnected"));
-    }
-
-    #[test]
-    fn the_viewer_closes_its_socket_when_the_host_says_goodbye() {
-        let (port, host_side) = fake_host(|stream| {
-            let bye = Message::Bye {
-                reason: "sharing stopped".into(),
-            };
-            write_message(stream, &bye).unwrap();
-        });
-        let (tx, rx) = mpsc::channel();
-        let viewer = ViewerController::default();
-        viewer
-            .connect(port, move |packet| {
-                let _ = tx.send(packet);
-            })
-            .unwrap();
-
-        let wait = Duration::from_secs(5);
-        assert_eq!(rx.recv_timeout(wait).unwrap(), ended("sharing stopped"));
-        // The host must see the connection close without the viewer being
-        // told to disconnect.
-        let mut host_stream = host_side.recv_timeout(wait).unwrap();
-        host_stream.set_read_timeout(Some(wait)).unwrap();
-        assert_eq!(host_stream.read(&mut [0u8; 16]).unwrap(), 0);
-    }
-
-    #[test]
-    #[ignore = "needs an interactive desktop with a monitor"]
-    fn a_viewer_receives_the_shared_screen() {
-        let _desktop = desktop();
-        let host = ShareController::default();
-        let port = host
-            .start(ShareSettings {
-                display: 0,
-                port: 0,
-                max_fps: 30,
-                bitrate_kbps: 4000,
-                allow_input: false,
-            })
-            .unwrap()
-            .port
-            .unwrap();
-
-        let (tx, rx) = mpsc::channel();
-        let viewer = ViewerController::default();
-        viewer
-            .connect(port, move |packet| {
-                let _ = tx.send(packet);
-            })
-            .unwrap();
-        assert!(viewer.connect(port, |_| {}).is_err(), "second connect");
-
-        let wait = Duration::from_secs(10);
-        // The host says what the viewer may do before it sends any picture.
-        let permissions = rx.recv_timeout(wait).expect("no permissions packet");
-        assert_eq!(permissions, [packet::PERMISSIONS, 0]);
-        let config = rx.recv_timeout(wait).expect("no config packet");
-        assert_eq!(config[0], packet::CONFIG);
-        let width = u32::from_le_bytes(config[1..5].try_into().unwrap());
-        assert!(width > 0 && width % 2 == 0);
-
-        let frame = rx.recv_timeout(wait).expect("no frame packet");
-        assert_eq!(frame[0], packet::FRAME);
-        assert_eq!(frame[1], 1, "the first frame must be a keyframe");
-        assert!(frame.len() > 10 + 4);
-        assert!(host.status().viewer_connected);
-        assert!(host.status().frames >= 1);
-        viewer.request_keyframe().unwrap();
-
-        viewer.disconnect();
-        let last = rx.iter().last().expect("no final packet");
-        assert_eq!(last[0], packet::ENDED);
-
-        // The host notices and goes back to waiting for a viewer.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while host.status().viewer_connected {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "host still shows a viewer"
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
-        assert!(host.status().active);
-        host.stop();
-    }
-}
+mod tests;
