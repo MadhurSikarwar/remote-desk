@@ -2529,6 +2529,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc-codec"
+version = "0.1.0"
+dependencies = [
+ "rc-capture",
+ "thiserror 1.0.69",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "rc-core"
 version = "0.1.0"
 dependencies = [
