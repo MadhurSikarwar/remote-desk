@@ -1,10 +1,12 @@
 //! Application state shared with the UI.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rc_core::logging::{self, LogGuard};
 use rc_core::{AppPaths, Config};
 use serde::Serialize;
+
+use crate::secure::Security;
 
 pub struct AppState {
     paths: Option<AppPaths>,
@@ -12,6 +14,9 @@ pub struct AppState {
     /// Set when the configuration could not be loaded. The in-memory defaults
     /// are then used read-only so a damaged file is never overwritten.
     startup_error: Option<String>,
+    /// This device's keys and approved devices, or why they are unavailable.
+    /// Without them the device can neither share nor view.
+    security: Result<Arc<Security>, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -21,6 +26,9 @@ pub struct Status {
     pub config_path: Option<String>,
     pub log_dir: Option<String>,
     pub config_error: Option<String>,
+    /// Fingerprint of this device's key, for people to compare.
+    pub fingerprint: Option<String>,
+    pub security_error: Option<String>,
 }
 
 impl AppState {
@@ -34,6 +42,7 @@ impl AppState {
                     paths: None,
                     config: Mutex::new(Config::default()),
                     startup_error: Some(e.to_string()),
+                    security: Err(e.to_string()),
                 };
                 return (state, None);
             }
@@ -57,6 +66,12 @@ impl AppState {
             ),
             Some(error) => tracing::error!(%error, "configuration could not be loaded"),
         }
+        match &state.security {
+            Ok(security) => {
+                tracing::info!(fingerprint = security.fingerprint(), "device key ready");
+            }
+            Err(error) => tracing::error!(%error, "device key unavailable"),
+        }
         (state, guard)
     }
 
@@ -66,10 +81,12 @@ impl AppState {
             Ok(config) => (config, None),
             Err(e) => (Config::default(), Some(e.to_string())),
         };
+        let security = Security::load(&paths.config_dir).map(Arc::new);
         Self {
             paths: Some(paths),
             config: Mutex::new(config),
             startup_error,
+            security,
         }
     }
 
@@ -83,6 +100,10 @@ impl AppState {
         self.lock().clone()
     }
 
+    pub fn security(&self) -> Option<Arc<Security>> {
+        self.security.as_ref().ok().cloned()
+    }
+
     pub fn status(&self) -> Status {
         Status {
             version: env!("CARGO_PKG_VERSION"),
@@ -93,6 +114,8 @@ impl AppState {
                 .map(|p| p.config_file().display().to_string()),
             log_dir: self.paths.as_ref().map(|p| p.log_dir.display().to_string()),
             config_error: self.startup_error.clone(),
+            fingerprint: self.security.as_ref().ok().map(|s| s.fingerprint()),
+            security_error: self.security.as_ref().err().cloned(),
         }
     }
 
@@ -135,6 +158,10 @@ mod tests {
         let status = state.status();
 
         assert_eq!(status.config_error, None);
+        assert_eq!(status.security_error, None);
+        assert_eq!(status.fingerprint.as_ref().map(String::len), Some(19));
+        // The key is created once and kept.
+        assert_eq!(state_in(&dir).status().fingerprint, status.fingerprint);
         assert_eq!(status.device_name, Config::default().device.name);
         assert_eq!(status.version, env!("CARGO_PKG_VERSION"));
         let config_path = status.config_path.unwrap();

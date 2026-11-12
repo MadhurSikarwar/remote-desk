@@ -2740,6 +2740,7 @@ dependencies = [
  "rc-capture",
  "rc-codec",
  "rc-core",
+ "rc-crypto",
  "rc-input",
  "rc-protocol",
  "serde",

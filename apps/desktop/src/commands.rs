@@ -1,13 +1,16 @@
 //! Commands the UI may invoke. They only forward to the controllers, which
 //! hold the logic and its tests.
 
+use std::time::Duration;
+
 use rc_core::Config;
+use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::share::{DisplaySummary, ShareController, ShareSettings, ShareStatus};
 use crate::state::{AppState, Status};
-use crate::viewer::{ViewerController, ViewerInput};
+use crate::viewer::{HostInfo, ViewerController, ViewerInput};
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -46,6 +49,8 @@ pub fn start_share(
         max_fps: config.video.max_fps,
         bitrate_kbps: config.video.max_bitrate_kbps,
         allow_input: config.security.allow_input,
+        device_name: config.device.name,
+        approval_timeout: Duration::from_secs(u64::from(config.security.approval_timeout_secs)),
     })?;
     // `display` cannot be used as a field name: the macro shadows it.
     let index = display;
@@ -64,6 +69,20 @@ pub fn stop_share(share: State<'_, ShareController>) -> ShareStatus {
     status
 }
 
+/// The user's answer to a viewer asking to see the screen. Only ever called
+/// from the Allow and Deny buttons.
+#[tauri::command]
+pub fn answer_approval(
+    share: State<'_, ShareController>,
+    id: u64,
+    allow: bool,
+    remember: bool,
+) -> Result<ShareStatus, String> {
+    let status = share.answer(id, allow, remember)?;
+    tracing::info!(id, allow, remember, "viewer request answered by the user");
+    Ok(status)
+}
+
 /// The host's own switch for letting the viewer control this computer.
 #[tauri::command]
 pub fn set_share_input(share: State<'_, ShareController>, allowed: bool) -> ShareStatus {
@@ -77,14 +96,16 @@ pub fn share_status(share: State<'_, ShareController>) -> ShareStatus {
     share.status()
 }
 
-/// Connects to a host on this computer; video packets arrive on `packets`.
+/// Connects to a host on this computer and returns who answered. Packets
+/// arrive on `packets` once the host allows the session.
 #[tauri::command(async)]
 pub fn view_connect(
+    state: State<'_, AppState>,
     viewer: State<'_, ViewerController>,
     port: u16,
     packets: Channel<InvokeResponseBody>,
-) -> Result<(), String> {
-    viewer.connect(port, move |packet| {
+) -> Result<HostInfo, String> {
+    viewer.connect(port, &state.config().device.name, move |packet| {
         // Fails only once the window is gone; the session ends with it.
         let _ = packets.send(InvokeResponseBody::Raw(packet));
     })
@@ -106,4 +127,47 @@ pub fn view_send_input(
     input: ViewerInput,
 ) -> Result<(), String> {
     viewer.send_input(&input)
+}
+
+/// A device the user approved and chose to remember.
+#[derive(Debug, Clone, Serialize)]
+pub struct RememberedDevice {
+    pub name: String,
+    pub fingerprint: String,
+    pub approved_at: u64,
+}
+
+#[tauri::command]
+pub fn list_remembered(state: State<'_, AppState>) -> Vec<RememberedDevice> {
+    let Some(security) = state.security() else {
+        return Vec::new();
+    };
+    let trust = security.trust();
+    trust
+        .devices()
+        .iter()
+        .filter_map(|device| {
+            Some(RememberedDevice {
+                name: device.name.clone(),
+                fingerprint: device.fingerprint()?,
+                approved_at: device.approved_at,
+            })
+        })
+        .collect()
+}
+
+/// Forgets a remembered device, identified by its key fingerprint.
+#[tauri::command]
+pub fn forget_remembered(state: State<'_, AppState>, fingerprint: String) -> Result<(), String> {
+    let security = state.security().ok_or("This device's key is unavailable")?;
+    let mut trust = security.trust();
+    let key = trust
+        .devices()
+        .iter()
+        .find(|device| device.fingerprint().as_deref() == Some(fingerprint.as_str()))
+        .and_then(|device| device.key())
+        .ok_or("That device is not in the list")?;
+    trust.forget(&key).map_err(|e| e.to_string())?;
+    tracing::info!(fingerprint, "remembered device forgotten by the user");
+    Ok(())
 }

@@ -12,6 +12,7 @@ tauri-build = { workspace = true }
 rc-capture = { path = "../../crates/rc-capture" }
 rc-codec = { path = "../../crates/rc-codec" }
 rc-core = { path = "../../crates/rc-core" }
+rc-crypto = { path = "../../crates/rc-crypto" }
 rc-input = { path = "../../crates/rc-input" }
 rc-protocol = { path = "../../crates/rc-protocol" }
 serde.workspace = true

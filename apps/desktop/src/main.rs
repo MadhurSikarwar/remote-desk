@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod secure;
 mod share;
 mod state;
 mod viewer;
@@ -74,9 +75,9 @@ fn main() {
     };
 
     let app = tauri::Builder::default()
+        .manage(share::ShareController::new(state.security()))
+        .manage(viewer::ViewerController::new(state.security()))
         .manage(state)
-        .manage(share::ShareController::default())
-        .manage(viewer::ViewerController::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::get_config,
@@ -86,10 +87,13 @@ fn main() {
             commands::stop_share,
             commands::share_status,
             commands::set_share_input,
+            commands::answer_approval,
             commands::view_connect,
             commands::view_request_keyframe,
             commands::view_disconnect,
-            commands::view_send_input
+            commands::view_send_input,
+            commands::list_remembered,
+            commands::forget_remembered
         ])
         .on_window_event({
             let start_watchdog = start_watchdog.clone();

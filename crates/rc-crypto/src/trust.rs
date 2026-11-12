@@ -28,6 +28,10 @@ pub struct TrustedDevice {
 }
 
 impl TrustedDevice {
+    pub fn key(&self) -> Option<PublicKey> {
+        decode_hex(&self.public_key)
+    }
+
     pub fn fingerprint(&self) -> Option<String> {
         decode_hex(&self.public_key).map(|key| fingerprint(&key))
     }
