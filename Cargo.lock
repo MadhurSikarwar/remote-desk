@@ -2568,6 +2568,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc-input"
+version = "0.1.0"
+dependencies = [
+ "rc-protocol",
+ "thiserror 1.0.69",
+ "tracing",
+ "windows",
+]
+
+[[package]]
 name = "rc-protocol"
 version = "0.1.0"
 dependencies = [
