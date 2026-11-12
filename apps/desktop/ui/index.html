@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Remote Control</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1 id="device-name">Remote Control</h1>
+        <p class="muted">Version <span id="version">–</span></p>
+      </div>
+      <p id="sharing" class="pill">Not sharing</p>
+    </header>
+
+    <p id="config-error" class="banner error" hidden></p>
+
+    <main>
+      <section>
+        <h2>This device</h2>
+        <dl>
+          <dt>Settings file</dt>
+          <dd id="config-path">–</dd>
+          <dt>Log folder</dt>
+          <dd id="log-dir">–</dd>
+        </dl>
+      </section>
+
+      <form id="settings" novalidate>
+        <section>
+          <h2>Device</h2>
+          <label>Name shown to other devices
+            <input name="device.name" type="text" maxlength="64" required />
+          </label>
+        </section>
+
+        <section>
+          <h2>Permissions</h2>
+          <p class="muted">
+            Every incoming session must be approved on this device. These
+            switches set what an approved session may do besides viewing.
+          </p>
+          <label class="check"><input name="security.allow_input" type="checkbox" /> Mouse and keyboard control</label>
+          <label class="check"><input name="security.allow_clipboard" type="checkbox" /> Clipboard sync</label>
+          <label class="check"><input name="security.allow_file_transfer" type="checkbox" /> File transfer</label>
+          <div class="row">
+            <label>Approval prompt timeout (seconds)
+              <input name="security.approval_timeout_secs" type="number" min="5" max="300" />
+            </label>
+            <label>Idle timeout (minutes, 0 = none)
+              <input name="security.idle_timeout_minutes" type="number" min="0" max="1440" />
+            </label>
+          </div>
+        </section>
+
+        <section>
+          <h2>Network</h2>
+          <label>Connection method
+            <select name="network.transport">
+              <option value="auto">Automatic: direct first, relay if needed</option>
+              <option value="direct-only">Direct only</option>
+              <option value="relay-only">Relay only</option>
+            </select>
+          </label>
+          <label>Rendezvous servers (one <code>host:port</code> per line)
+            <textarea name="network.rendezvous_servers" rows="2" spellcheck="false"></textarea>
+          </label>
+          <label>Relay servers (one <code>host:port</code> per line)
+            <textarea name="network.relay_servers" rows="2" spellcheck="false"></textarea>
+          </label>
+          <div class="row">
+            <label>Direct connection port (0 = automatic)
+              <input name="network.direct_port" type="number" min="0" max="65535" />
+            </label>
+            <label class="check"><input name="network.lan_discovery" type="checkbox" /> Find devices on the local network</label>
+          </div>
+        </section>
+
+        <section>
+          <h2>Video</h2>
+          <div class="row">
+            <label>Maximum frames per second
+              <input name="video.max_fps" type="number" min="1" max="120" />
+            </label>
+            <label>Maximum bitrate (kbit/s)
+              <input name="video.max_bitrate_kbps" type="number" min="100" max="100000" />
+            </label>
+          </div>
+          <label class="check"><input name="video.adaptive_quality" type="checkbox" /> Adapt quality to the connection</label>
+        </section>
+
+        <section>
+          <h2>Logging</h2>
+          <div class="row">
+            <label>Level (applies after restart)
+              <select name="logging.level">
+                <option value="error">Error</option>
+                <option value="warn">Warning</option>
+                <option value="info">Info</option>
+                <option value="debug">Debug</option>
+                <option value="trace">Trace</option>
+              </select>
+            </label>
+            <label>Keep log files for (days)
+              <input name="logging.retention_days" type="number" min="1" max="365" />
+            </label>
+          </div>
+          <label class="check"><input name="logging.file_enabled" type="checkbox" /> Write logs to a file</label>
+        </section>
+
+        <footer>
+          <p id="save-result" role="status"></p>
+          <button id="save" type="submit" disabled>Save settings</button>
+        </footer>
+      </form>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
