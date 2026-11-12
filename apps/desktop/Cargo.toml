@@ -10,7 +10,9 @@ tauri-build = { workspace = true }
 
 [dependencies]
 rc-capture = { path = "../../crates/rc-capture" }
+rc-codec = { path = "../../crates/rc-codec" }
 rc-core = { path = "../../crates/rc-core" }
+rc-protocol = { path = "../../crates/rc-protocol" }
 serde.workspace = true
 tauri.workspace = true
 tracing.workspace = true

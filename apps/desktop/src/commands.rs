@@ -1,11 +1,13 @@
-//! Commands the UI may invoke. They only forward to `AppState`, which holds
-//! the logic and its tests.
+//! Commands the UI may invoke. They only forward to the controllers, which
+//! hold the logic and its tests.
 
 use rc_core::Config;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
-use crate::capture::{CaptureController, CaptureStatus, DisplaySummary};
+use crate::share::{DisplaySummary, ShareController, ShareSettings, ShareStatus};
 use crate::state::{AppState, Status};
+use crate::viewer::ViewerController;
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -23,32 +25,68 @@ pub fn save_config(state: State<'_, AppState>, config: Config) -> Result<Config,
 }
 
 #[tauri::command]
-pub fn list_displays(capture: State<'_, CaptureController>) -> Result<Vec<DisplaySummary>, String> {
-    capture.displays()
+pub fn list_displays(share: State<'_, ShareController>) -> Result<Vec<DisplaySummary>, String> {
+    share.displays()
 }
 
-/// Only ever called from the Start button: capture never begins on its own.
-#[tauri::command]
-pub fn start_capture(
+// Commands that can wait on a socket or a thread are `async`, which runs
+// them off the UI thread so the window stays responsive.
+
+/// Only ever called from the Start button: sharing never begins on its own.
+#[tauri::command(async)]
+pub fn start_share(
     state: State<'_, AppState>,
-    capture: State<'_, CaptureController>,
+    share: State<'_, ShareController>,
     display: usize,
-) -> Result<CaptureStatus, String> {
-    let status = capture.start(display, state.config().video.max_fps)?;
+) -> Result<ShareStatus, String> {
+    let config = state.config();
+    let status = share.start(ShareSettings {
+        display,
+        port: config.network.direct_port,
+        max_fps: config.video.max_fps,
+        bitrate_kbps: config.video.max_bitrate_kbps,
+    })?;
     // `display` cannot be used as a field name: the macro shadows it.
     let index = display;
-    tracing::info!(index, "screen capture started by the user");
+    tracing::info!(
+        index,
+        port = status.port,
+        "screen sharing started by the user"
+    );
     Ok(status)
 }
 
-#[tauri::command]
-pub fn stop_capture(capture: State<'_, CaptureController>) -> CaptureStatus {
-    let status = capture.stop();
-    tracing::info!(frames = status.frames, "screen capture stopped");
+#[tauri::command(async)]
+pub fn stop_share(share: State<'_, ShareController>) -> ShareStatus {
+    let status = share.stop();
+    tracing::info!(frames = status.frames, "screen sharing stopped");
     status
 }
 
 #[tauri::command]
-pub fn capture_status(capture: State<'_, CaptureController>) -> CaptureStatus {
-    capture.status()
+pub fn share_status(share: State<'_, ShareController>) -> ShareStatus {
+    share.status()
+}
+
+/// Connects to a host on this computer; video packets arrive on `packets`.
+#[tauri::command(async)]
+pub fn view_connect(
+    viewer: State<'_, ViewerController>,
+    port: u16,
+    packets: Channel<InvokeResponseBody>,
+) -> Result<(), String> {
+    viewer.connect(port, move |packet| {
+        // Fails only once the window is gone; the session ends with it.
+        let _ = packets.send(InvokeResponseBody::Raw(packet));
+    })
+}
+
+#[tauri::command]
+pub fn view_request_keyframe(viewer: State<'_, ViewerController>) -> Result<(), String> {
+    viewer.request_keyframe()
+}
+
+#[tauri::command(async)]
+pub fn view_disconnect(viewer: State<'_, ViewerController>) {
+    viewer.disconnect();
 }

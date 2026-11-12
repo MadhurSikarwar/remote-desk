@@ -29,18 +29,31 @@
       </section>
 
       <section>
-        <h2>Screen capture test</h2>
+        <h2>Share this screen</h2>
         <p class="muted">
-          Captures this screen on this device only, to check that capture
-          works. Nothing is recorded or sent anywhere.
+          Shares only with a viewer on this computer for now: the encrypted
+          connection between devices is not built yet. Sharing starts and
+          stops here and nowhere else.
         </p>
         <div class="row">
           <label>Display
-            <select id="capture-display"></select>
+            <select id="share-display"></select>
           </label>
-          <button id="capture-toggle" type="button" disabled>Start capture</button>
+          <button id="share-toggle" type="button" disabled>Start sharing</button>
         </div>
-        <p id="capture-stats" role="status"></p>
+        <p id="share-stats" role="status"></p>
+      </section>
+
+      <section>
+        <h2>View a screen</h2>
+        <div class="row">
+          <label>Port shown by the sharing device (this computer only)
+            <input id="view-port" type="number" min="1" max="65535" />
+          </label>
+          <button id="view-toggle" type="button">Connect</button>
+        </div>
+        <p id="view-stats" role="status"></p>
+        <canvas id="view-canvas" hidden></canvas>
       </section>
 
       <form id="settings" novalidate>
@@ -132,6 +145,7 @@
       </form>
     </main>
 
+    <script src="session.js"></script>
     <script src="main.js"></script>
   </body>
 </html>

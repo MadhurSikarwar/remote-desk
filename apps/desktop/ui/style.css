@@ -81,6 +81,20 @@ p {
   font-weight: 600;
 }
 
+.pill.armed {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+#view-canvas {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  background: #000;
+  border-radius: 6px;
+}
+
 .row > button {
   margin-bottom: 12px;
 }
