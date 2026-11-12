@@ -249,6 +249,43 @@ pub fn read_message<R: Read>(reader: &mut R) -> Result<Message, ProtocolError> {
     Message::decode_body(&body)
 }
 
+/// Reassembles messages from bytes that arrive in arbitrary pieces.
+///
+/// Unlike [`read_message`], this never blocks and never loses data when a
+/// read is interrupted part-way through a message, so it suits sockets with
+/// a read timeout.
+#[derive(Debug, Default)]
+pub struct MessageDecoder {
+    buffer: Vec<u8>,
+}
+
+impl MessageDecoder {
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.buffer.extend_from_slice(bytes);
+    }
+
+    /// The next complete message, or `None` until more bytes arrive. After
+    /// an error the stream is unusable.
+    pub fn next_message(&mut self) -> Result<Option<Message>, ProtocolError> {
+        let Some((prefix, rest)) = self.buffer.split_first_chunk::<4>() else {
+            return Ok(None);
+        };
+        let len = u32::from_le_bytes(*prefix) as usize;
+        if len == 0 {
+            return Err(ProtocolError::Empty);
+        }
+        if len > MAX_MESSAGE_BYTES {
+            return Err(ProtocolError::TooLarge(len));
+        }
+        if rest.len() < len {
+            return Ok(None);
+        }
+        let message = Message::decode_body(&rest[..len]);
+        self.buffer.drain(..4 + len);
+        message.map(Some)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +433,50 @@ mod tests {
             read_message(&mut bytes.as_slice()),
             Err(ProtocolError::Io(_))
         ));
+    }
+
+    #[test]
+    fn decoder_reassembles_messages_fed_one_byte_at_a_time() {
+        let mut stream = Vec::new();
+        for message in samples() {
+            write_message(&mut stream, &message).unwrap();
+        }
+        let mut decoder = MessageDecoder::default();
+        let mut decoded = Vec::new();
+        for byte in stream {
+            decoder.push(&[byte]);
+            while let Some(message) = decoder.next_message().unwrap() {
+                decoded.push(message);
+            }
+        }
+        assert_eq!(decoded, samples());
+        assert_eq!(decoder.next_message().unwrap(), None);
+    }
+
+    #[test]
+    fn decoder_yields_every_message_from_one_large_push() {
+        let mut stream = Vec::new();
+        for message in samples() {
+            write_message(&mut stream, &message).unwrap();
+        }
+        let mut decoder = MessageDecoder::default();
+        decoder.push(&stream);
+        let decoded: Vec<_> = std::iter::from_fn(|| decoder.next_message().unwrap()).collect();
+        assert_eq!(decoded, samples());
+    }
+
+    #[test]
+    fn decoder_rejects_bad_lengths_before_the_body_arrives() {
+        let mut decoder = MessageDecoder::default();
+        decoder.push(&((MAX_MESSAGE_BYTES + 1) as u32).to_le_bytes());
+        assert!(matches!(
+            decoder.next_message(),
+            Err(ProtocolError::TooLarge(_))
+        ));
+
+        let mut decoder = MessageDecoder::default();
+        decoder.push(&[0; 4]);
+        assert!(matches!(decoder.next_message(), Err(ProtocolError::Empty)));
     }
 
     #[test]
