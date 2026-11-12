@@ -165,6 +165,10 @@ What was done:
 
 This is hardening against a suspected cause, not a verified fix.
 
+Update from milestone 4: with the new logging the picture changed. The
+window does close; the process then stalls inside the framework's shutdown.
+See `MILESTONE-4.md`, "Shutdown".
+
 ## Next milestone
 
 Milestone 4: mouse and keyboard from the viewer to the host, off by default
