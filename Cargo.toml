@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = ["crates/rc-core", "apps/desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+thiserror = "1"
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+tempfile = "3"
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Dependencies are built without debug info: it keeps `target/` small, which
+# matters because the checkout may live in a synced folder.
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
