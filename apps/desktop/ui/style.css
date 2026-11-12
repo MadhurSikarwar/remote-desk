@@ -87,6 +87,11 @@ p {
   font-weight: 600;
 }
 
+#view-canvas.controlling {
+  outline: 2px solid var(--error);
+  cursor: crosshair;
+}
+
 #view-canvas {
   display: block;
   width: 100%;

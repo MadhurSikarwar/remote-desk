@@ -12,12 +12,13 @@
   const shareDisplay = $("share-display");
   const shareToggle = $("share-toggle");
   const shareStats = $("share-stats");
+  const shareInput = $("share-input");
   let shareTimer = null;
 
   function showShare(status) {
     const live = status.active && status.viewer_connected;
     pill.textContent = live
-      ? "Sharing screen"
+      ? status.input_allowed ? "Sharing screen — viewer has control" : "Sharing screen"
       : status.active
         ? "Sharing on — no viewer"
         : "Not sharing";
@@ -27,8 +28,11 @@
     shareToggle.textContent = status.active ? "Stop sharing" : "Start sharing";
     shareToggle.dataset.active = String(status.active);
     shareDisplay.disabled = status.active;
+    shareInput.disabled = !status.active;
+    shareInput.checked = status.input_allowed;
 
-    const sent = `${status.frames} frames, ${(status.bytes / 1e6).toFixed(1)} MB sent`;
+    const sent = `${status.frames} frames, ${(status.bytes / 1e6).toFixed(1)} MB sent` +
+      (status.input_events > 0 ? `, ${status.input_events} input events carried out` : "");
     shareStats.classList.toggle("error", Boolean(status.error));
     if (status.error) {
       shareStats.textContent = status.error;
@@ -67,6 +71,15 @@
     shareToggle.disabled = false;
   });
 
+  shareInput.addEventListener("change", async () => {
+    try {
+      showShare(await invoke("set_share_input", { allowed: shareInput.checked }));
+    } catch (error) {
+      shareStats.textContent = message(error);
+      shareStats.classList.add("error");
+    }
+  });
+
   // ---- Viewer: watch a shared screen -------------------------------------
 
   const viewPort = $("view-port");
@@ -75,7 +88,10 @@
   const canvas = $("view-canvas");
   const context = canvas.getContext("2d");
 
-  const PACKET = { CONFIG: 1, FRAME: 2, ENDED: 3 };
+  const viewControl = $("view-control");
+  const viewControlLabel = $("view-control-label");
+
+  const PACKET = { CONFIG: 1, FRAME: 2, ENDED: 3, PERMISSIONS: 4 };
   // H.264 Main profile, level 4.0. With no `description` the decoder expects
   // the Annex B stream the host sends.
   const CODEC = "avc1.4d0028";
@@ -150,10 +166,112 @@
         timestamp: Number(view.getBigUint64(2, true)),
         data: bytes.subarray(10),
       }));
+    } else if (bytes[0] === PACKET.PERMISSIONS) {
+      setHostAllowsControl((bytes[1] & 1) === 1);
     } else if (bytes[0] === PACKET.ENDED) {
       endViewing(new TextDecoder().decode(bytes.subarray(1)));
     }
   }
+
+  // ---- Viewer: control ----------------------------------------------------
+  //
+  // Input is sent only while the viewer has ticked "Control" *and* the host
+  // allows it. The host enforces its side regardless of what is sent.
+
+  let hostAllowsControl = false;
+  const heldKeys = new Set();
+  let pendingMove = null;
+
+  function controlling() {
+    return viewing && hostAllowsControl && viewControl.checked;
+  }
+
+  function send(input) {
+    invoke("view_send_input", { input }).catch(() => {});
+  }
+
+  function position(event) {
+    const box = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - box.left) / box.width,
+      y: (event.clientY - box.top) / box.height,
+    };
+  }
+
+  function releaseHeldKeys() {
+    for (const code of heldKeys) send({ kind: "key", code, down: false });
+    heldKeys.clear();
+  }
+
+  function showControl() {
+    viewControl.disabled = !(viewing && hostAllowsControl);
+    if (viewControl.disabled) viewControl.checked = false;
+    viewControlLabel.textContent = !viewing || hostAllowsControl
+      ? "Control the shared screen"
+      : "Control the shared screen (the host has not allowed it)";
+    canvas.classList.toggle("controlling", controlling());
+    if (!controlling()) releaseHeldKeys();
+  }
+
+  function setHostAllowsControl(allowed) {
+    hostAllowsControl = allowed;
+    showControl();
+  }
+
+  viewControl.addEventListener("change", () => {
+    showControl();
+    if (controlling()) canvas.focus();
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (!controlling()) return;
+    // Pointer events can arrive far faster than frames; send one per frame.
+    const first = pendingMove === null;
+    pendingMove = position(event);
+    if (first) {
+      requestAnimationFrame(() => {
+        if (controlling()) send({ kind: "move", ...pendingMove });
+        pendingMove = null;
+      });
+    }
+  });
+
+  for (const [type, down] of [["pointerdown", true], ["pointerup", false]]) {
+    canvas.addEventListener(type, (event) => {
+      if (!controlling()) return;
+      event.preventDefault();
+      if (down) {
+        canvas.focus();
+        // Keeps the drag alive outside the picture; not essential.
+        try { canvas.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+      }
+      send({ kind: "button", button: event.button, down, ...position(event) });
+    });
+  }
+
+  canvas.addEventListener("wheel", (event) => {
+    if (!controlling()) return;
+    event.preventDefault();
+    // The browser reports "down" as positive; Windows counts "up" as positive.
+    const notches = (delta) => (event.deltaMode === 0 ? delta / 100 : delta);
+    send({ kind: "wheel", dx: notches(event.deltaX), dy: -notches(event.deltaY) });
+  }, { passive: false });
+
+  canvas.addEventListener("contextmenu", (event) => {
+    if (controlling()) event.preventDefault();
+  });
+
+  for (const [type, down] of [["keydown", true], ["keyup", false]]) {
+    canvas.addEventListener(type, (event) => {
+      if (!controlling()) return;
+      event.preventDefault();
+      if (down) heldKeys.add(event.code); else heldKeys.delete(event.code);
+      send({ kind: "key", code: event.code, down });
+    });
+  }
+
+  // Keys must not stay down on the host when the viewer looks away.
+  canvas.addEventListener("blur", releaseHeldKeys);
 
   function showViewStats() {
     const now = performance.now();
@@ -175,6 +293,7 @@
     decoder = null;
     viewToggle.textContent = "Connect";
     viewPort.disabled = false;
+    setHostAllowsControl(false);
     viewStats.classList.remove("error");
     viewStats.textContent = `Ended: ${reason}. ${totals.drawn} frames shown.`;
   }

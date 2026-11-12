@@ -41,6 +41,10 @@
           </label>
           <button id="share-toggle" type="button" disabled>Start sharing</button>
         </div>
+        <label class="check">
+          <input id="share-input" type="checkbox" disabled />
+          Let the viewer control this computer's mouse and keyboard
+        </label>
         <p id="share-stats" role="status"></p>
       </section>
 
@@ -52,8 +56,12 @@
           </label>
           <button id="view-toggle" type="button">Connect</button>
         </div>
+        <label class="check">
+          <input id="view-control" type="checkbox" disabled />
+          <span id="view-control-label">Control the shared screen</span>
+        </label>
         <p id="view-stats" role="status"></p>
-        <canvas id="view-canvas" hidden></canvas>
+        <canvas id="view-canvas" tabindex="0" hidden></canvas>
       </section>
 
       <form id="settings" novalidate>
