@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show && cargo -V
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: ci/run.sh cargo fmt --all -- --check
+      - name: Clippy
+        run: ci/run.sh cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: ci/run.sh cargo test --workspace --locked
