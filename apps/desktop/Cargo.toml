@@ -1,0 +1,21 @@
+[package]
+name = "rc-desktop"
+description = "Remote Control desktop application"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+rc-core = { path = "../../crates/rc-core" }
+serde.workspace = true
+tauri.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
