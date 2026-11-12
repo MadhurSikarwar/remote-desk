@@ -325,6 +325,7 @@ fn run_session(
         &keyframe_wanted,
         &injector,
     );
+    tracing::debug!("frame loop ended");
     lock(&injector).release_all();
 
     let reason = match &result {
@@ -334,7 +335,9 @@ fn run_session(
     let _ = write_message(&mut &*stream, &Message::Bye { reason });
     finished.store(true, Ordering::Relaxed);
     let _ = stream.shutdown(Shutdown::Both);
+    tracing::debug!("waiting for the session reader");
     let _ = reader.join();
+    tracing::debug!("session reader finished");
     result
 }
 
@@ -543,6 +546,7 @@ impl ShareController {
         };
         worker.shared.stop.store(true, Ordering::Relaxed);
         let seconds = worker.started.elapsed().as_secs_f64();
+        tracing::debug!("waiting for the share thread");
         if worker.thread.join().is_err() {
             tracing::error!("share thread panicked");
         }
