@@ -294,7 +294,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::share::test_support::Duplex;
+    use crate::share::test_support::{desktop, Duplex};
     use crate::share::{ShareController, ShareSettings};
 
     #[test]
@@ -507,6 +507,7 @@ mod tests {
     #[test]
     #[ignore = "needs an interactive desktop with a monitor"]
     fn a_viewer_receives_the_shared_screen() {
+        let _desktop = desktop();
         let host = ShareController::default();
         let port = host
             .start(ShareSettings {
@@ -530,6 +531,9 @@ mod tests {
         assert!(viewer.connect(port, |_| {}).is_err(), "second connect");
 
         let wait = Duration::from_secs(10);
+        // The host says what the viewer may do before it sends any picture.
+        let permissions = rx.recv_timeout(wait).expect("no permissions packet");
+        assert_eq!(permissions, [packet::PERMISSIONS, 0]);
         let config = rx.recv_timeout(wait).expect("no config packet");
         assert_eq!(config[0], packet::CONFIG);
         let width = u32::from_le_bytes(config[1..5].try_into().unwrap());

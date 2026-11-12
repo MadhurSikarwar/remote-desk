@@ -591,6 +591,14 @@ impl ShareController {
 #[cfg(test)]
 pub mod test_support {
     use std::io::{Cursor, Read, Write};
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Tests that capture the screen or drive the real mouse and keyboard
+    /// share one desktop, so they take turns.
+    pub fn desktop() -> MutexGuard<'static, ()> {
+        static DESKTOP: Mutex<()> = Mutex::new(());
+        DESKTOP.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     use rc_protocol::{read_message, write_message, Message};
 
@@ -637,7 +645,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::Duplex;
+    use super::test_support::{desktop, Duplex};
     use super::*;
 
     const MS: Duration = Duration::from_millis(1);
@@ -731,6 +739,7 @@ mod tests {
     #[test]
     #[ignore = "needs an interactive desktop with a monitor"]
     fn unknown_display_fails_to_start() {
+        let _desktop = desktop();
         let controller = ShareController::default();
         let error = controller
             .start(ShareSettings {
@@ -745,6 +754,7 @@ mod tests {
     #[test]
     #[ignore = "needs an interactive desktop with a monitor"]
     fn stop_returns_promptly_while_a_silent_viewer_stays_connected() {
+        let _desktop = desktop();
         let controller = ShareController::default();
         let port = controller.start(settings()).unwrap().port.unwrap();
 
@@ -793,10 +803,12 @@ mod tests {
     }
 
     /// Reads from the host until it announces permissions.
-    fn next_permissions(viewer: &mut TcpStream) -> bool {
+    fn next_permissions(viewer: &mut TcpStream, host: &ShareController) -> bool {
         loop {
-            if let Message::Permissions(permissions) = read_message(viewer).unwrap() {
-                return permissions.input;
+            match read_message(viewer) {
+                Ok(Message::Permissions(permissions)) => return permissions.input,
+                Ok(_) => {}
+                Err(e) => panic!("{e}; host status: {:?}", host.status()),
             }
         }
     }
@@ -812,6 +824,7 @@ mod tests {
     #[test]
     #[ignore = "moves the real mouse pointer and presses Shift briefly"]
     fn input_works_only_while_the_host_allows_it() {
+        let _desktop = desktop();
         use rc_protocol::InputEvent;
 
         let display = rc_capture::list_displays().unwrap().remove(0);
@@ -855,7 +868,7 @@ mod tests {
         let parked = pointer();
 
         // 1. Off by default: the viewer is told, and its input does nothing.
-        assert!(!next_permissions(&mut viewer));
+        assert!(!next_permissions(&mut viewer, &controller));
         write_message(&mut viewer, &to_centre).unwrap();
         write_message(&mut viewer, &shift(true)).unwrap();
         wait_until("ignored input", || controller.status().input_ignored == 2);
@@ -863,7 +876,7 @@ mod tests {
 
         // 2. The host allows control: the viewer is told, and input works.
         assert!(controller.set_input_allowed(true).input_allowed);
-        assert!(next_permissions(&mut viewer));
+        assert!(next_permissions(&mut viewer, &controller));
         write_message(&mut viewer, &to_centre).unwrap();
         write_message(&mut viewer, &shift(true)).unwrap();
         wait_until("accepted input", || controller.status().input_events == 2);
@@ -873,7 +886,7 @@ mod tests {
         // 3. The host withdraws control: the held key is let go, and
         //    further input does nothing.
         assert!(!controller.set_input_allowed(false).input_allowed);
-        assert!(!next_permissions(&mut viewer));
+        assert!(!next_permissions(&mut viewer, &controller));
         thread::sleep(Duration::from_millis(30));
         let shift_after_revoke = shift_is_down();
         write_message(&mut viewer, &to_corner).unwrap();
@@ -903,6 +916,7 @@ mod tests {
     #[test]
     #[ignore = "needs an interactive desktop with a monitor"]
     fn sharing_listens_on_loopback_only_and_refuses_a_second_start() {
+        let _desktop = desktop();
         let controller = ShareController::default();
         let status = controller.start(settings()).unwrap();
         let port = status.port.unwrap();
