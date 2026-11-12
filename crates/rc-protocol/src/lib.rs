@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 
 /// Bumped on any incompatible change; peers with different versions refuse
 /// to talk.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Upper bound on one message, so a corrupt or hostile length prefix cannot
 /// make the reader allocate without limit. A 4K keyframe is far below this.
@@ -82,7 +82,15 @@ pub struct Permissions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     /// First message in each direction.
-    Hello { version: u16, role: Role },
+    Hello {
+        version: u16,
+        role: Role,
+        /// The name the device goes by. Chosen by its user, so it is shown
+        /// to people but never used to decide anything.
+        name: String,
+    },
+    /// Host to viewer: the person at the host allowed this session.
+    Accepted,
     /// Sent by the host before the first frame and whenever the size changes.
     VideoConfig { width: u32, height: u32, fps: u32 },
     /// One H.264 access unit in Annex B format.
@@ -125,6 +133,7 @@ mod tag {
     pub const BYE: u8 = 5;
     pub const INPUT: u8 = 6;
     pub const PERMISSIONS: u8 = 7;
+    pub const ACCEPTED: u8 = 8;
 }
 
 mod input_tag {
@@ -189,6 +198,14 @@ impl<'a> Reader<'a> {
         self.take(len)
     }
 
+    fn text(&mut self) -> Result<String, ProtocolError> {
+        let bytes = self.bytes()?;
+        if bytes.len() > MAX_TEXT_BYTES {
+            return Err(ProtocolError::Malformed("text too long"));
+        }
+        String::from_utf8(bytes.to_vec()).map_err(|_| ProtocolError::Malformed("text is not UTF-8"))
+    }
+
     fn finish(self) -> Result<(), ProtocolError> {
         if self.rest.is_empty() {
             Ok(())
@@ -196,6 +213,15 @@ impl<'a> Reader<'a> {
             Err(ProtocolError::Malformed("trailing bytes"))
         }
     }
+}
+
+/// Writes text, cut to the size limit on a character boundary.
+fn put_text(out: &mut Vec<u8>, text: &str) {
+    let mut end = text.len().min(MAX_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    put_bytes(out, &text.as_bytes()[..end]);
 }
 
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -276,14 +302,20 @@ impl Message {
     /// prefix) to `out`.
     pub fn encode_body(&self, out: &mut Vec<u8>) {
         match self {
-            Self::Hello { version, role } => {
+            Self::Hello {
+                version,
+                role,
+                name,
+            } => {
                 out.push(tag::HELLO);
                 out.extend_from_slice(&version.to_le_bytes());
                 out.push(match role {
                     Role::Host => 0,
                     Role::Viewer => 1,
                 });
+                put_text(out, name);
             }
+            Self::Accepted => out.push(tag::ACCEPTED),
             Self::VideoConfig { width, height, fps } => {
                 out.push(tag::VIDEO_CONFIG);
                 for value in [width, height, fps] {
@@ -303,11 +335,7 @@ impl Message {
             Self::KeyframeRequest => out.push(tag::KEYFRAME_REQUEST),
             Self::Bye { reason } => {
                 out.push(tag::BYE);
-                let mut end = reason.len().min(MAX_TEXT_BYTES);
-                while !reason.is_char_boundary(end) {
-                    end -= 1;
-                }
-                put_bytes(out, &reason.as_bytes()[..end]);
+                put_text(out, reason);
             }
             Self::Input(event) => {
                 out.push(tag::INPUT);
@@ -332,7 +360,9 @@ impl Message {
                     1 => Role::Viewer,
                     _ => return Err(ProtocolError::Malformed("unknown role")),
                 },
+                name: r.text()?,
             },
+            tag::ACCEPTED => Self::Accepted,
             tag::VIDEO_CONFIG => Self::VideoConfig {
                 width: r.u32()?,
                 height: r.u32()?,
@@ -348,16 +378,7 @@ impl Message {
                 data: r.bytes()?.to_vec(),
             },
             tag::KEYFRAME_REQUEST => Self::KeyframeRequest,
-            tag::BYE => {
-                let text = r.bytes()?;
-                if text.len() > MAX_TEXT_BYTES {
-                    return Err(ProtocolError::Malformed("text too long"));
-                }
-                Self::Bye {
-                    reason: String::from_utf8(text.to_vec())
-                        .map_err(|_| ProtocolError::Malformed("text is not UTF-8"))?,
-                }
-            }
+            tag::BYE => Self::Bye { reason: r.text()? },
             tag::INPUT => Self::Input(InputEvent::decode(&mut r)?),
             tag::PERMISSIONS => {
                 let flags = r.u8()?;
@@ -451,11 +472,14 @@ mod tests {
             Message::Hello {
                 version: PROTOCOL_VERSION,
                 role: Role::Host,
+                name: "Workshop PC".into(),
             },
             Message::Hello {
                 version: 0xBEEF,
                 role: Role::Viewer,
+                name: String::new(),
             },
+            Message::Accepted,
             Message::VideoConfig {
                 width: 1920,
                 height: 1080,
