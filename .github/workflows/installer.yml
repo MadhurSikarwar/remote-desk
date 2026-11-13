@@ -90,3 +90,61 @@ jobs:
             dist/rc-server-linux-x86_64.tar.gz
             dist/SHA256SUMS.txt
           if-no-files-found: error
+
+  # Packages for the other systems. Unsigned, and (so far) able to view and
+  # control a Windows host but not to share their own screen.
+  linux-desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux libraries for the window
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev libdbus-1-dev pkg-config
+      - name: Toolchain
+        run: rustup show && cargo -V
+      - uses: Swatinem/rust-cache@v2
+      - name: Tauri CLI
+        run: ci/run.sh cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build packages
+        working-directory: apps/desktop
+        run: ../../ci/run.sh cargo tauri build --bundles deb,appimage
+      - name: Checksums
+        run: |
+          cd target/release/bundle
+          find . -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec sha256sum {} \; | tee SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/SHA256SUMS.txt
+          if-no-files-found: error
+
+  macos-desktop:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: rustup show && cargo -V
+      - uses: Swatinem/rust-cache@v2
+      - name: Tauri CLI
+        run: ci/run.sh cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+      - name: Build package
+        working-directory: apps/desktop
+        run: ../../ci/run.sh cargo tauri build --bundles dmg
+      - name: Checksums
+        run: |
+          cd target/release/bundle/dmg
+          shasum -a 256 *.dmg | tee SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-desktop
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/dmg/SHA256SUMS.txt
+          if-no-files-found: error

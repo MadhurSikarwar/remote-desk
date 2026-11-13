@@ -57,3 +57,29 @@ jobs:
           ci/run.sh cargo build --release -p rc-server --locked
           sudo install -m 755 target/release/rc-server /usr/local/bin/rc-server
           ci/run.sh systemd-analyze verify deploy/rc-server.service
+
+  # The application on Linux and macOS: what builds there, builds clean and
+  # passes its tests. Sharing a screen is not implemented on these systems
+  # yet (see docs/PLATFORMS.md); viewing, files, clipboard and the rest are.
+  other-systems:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux libraries for the window
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev libdbus-1-dev pkg-config
+      - name: Toolchain
+        run: rustup show && cargo -V
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: ci/run.sh cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: ci/run.sh cargo test --workspace --locked

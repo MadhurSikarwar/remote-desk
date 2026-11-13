@@ -5,6 +5,8 @@ Writes next to this file:
     logo.svg        the logo as a vector (also copied to ../ui for the window)
     logo-1024.png   a large picture of it
     icon.ico        the Windows icon (16 to 256 pixels)
+    icon.icns, icon.png, 32x32.png, 128x128.png, 128x128@2x.png
+                    the macOS and Linux icons
 
     pip install pillow
     python make_logo.py
@@ -113,4 +115,8 @@ if __name__ == "__main__":
         (where / "logo.svg").write_text(svg(), encoding="utf-8", newline="\n")
     draw(1024).save(HERE / "logo-1024.png")
     (HERE / "icon.ico").write_bytes(ico([16, 24, 32, 48, 64, 128, 256]))
-    print("wrote logo.svg, logo-1024.png, icon.ico")
+    # The other systems: Linux packages want PNGs, macOS wants an .icns.
+    for name, size in (("32x32.png", 32), ("128x128.png", 128), ("128x128@2x.png", 256), ("icon.png", 512)):
+        draw(size).save(HERE / name)
+    draw(1024).save(HERE / "icon.icns")
+    print("wrote logo.svg, logo-1024.png, icon.ico, icon.icns and the PNG sizes")
