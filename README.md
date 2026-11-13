@@ -40,12 +40,172 @@ monitoring system, which is unrelated.)*
 What it does **not** do: unattended access, start with Windows, run in the
 background or hidden, run commands remotely, record, or carry audio.
 
-## Install and use
+## Install on another computer (step by step)
 
-Windows 10 or 11. Get `Remote Desk_<version>_x64-setup.exe` (see
-`docs/RELEASING.md`; there is no published release yet) and read
-`docs/USER-GUIDE.md`. The installer is per-user and needs no administrator
-rights. It is unsigned: Windows will warn.
+Use this to try Prometheus between two Windows computers. **You need it on
+both**: one is the *host* (its screen is shared), one is the *viewer*.
+
+### Before you start
+
+- Both computers: **Windows 10 or 11, 64-bit**. The window needs Microsoft's
+  *WebView2 Runtime*, which Windows 11 and an up-to-date Windows 10 already
+  have (the installer fetches it if it is missing; the portable file below
+  does not).
+- For the simple test, both computers on the **same network** (same Wi-Fi or
+  router; not a "guest" network, which often blocks devices from each other).
+- You can use any normal Windows account. **No administrator rights are
+  needed** to install or run it.
+
+### Step 1. Get the program
+
+Pick **A** or **B**. **The program is not code-signed**, so Windows will warn
+(see "If Windows blocks it" below).
+
+**A. The installer** (built and tested by GitHub Actions on a clean machine)
+
+1. Open the repository page, <https://github.com/MadhurSikarwar/remote-desk>,
+   and sign in to GitHub (downloads from Actions need a login).
+2. Click **Actions**, then the workflow **Installer**, then the newest run
+   with a green tick on `main`.
+3. At the bottom, under **Artifacts**, download **windows-installer** and
+   unzip it. Inside: `Prometheus_0.1.0_x64-setup.exe` and `SHA256SUMS.txt`.
+4. Check the file was not damaged: in PowerShell run
+   `Get-FileHash .\Prometheus_0.1.0_x64-setup.exe` and compare the value with
+   `SHA256SUMS.txt`.
+5. Double-click the installer. It installs for your user only (into
+   `%LOCALAPPDATA%\Prometheus`) and puts a shortcut in the Start menu and on
+   the Desktop. It does not start with Windows and installs no service.
+
+**B. The portable file** (no installer; copy one file)
+
+1. On the computer where the project was built, take `dist\Prometheus.exe`
+   (about 11 MB) and `dist\SHA256SUMS.txt`. Copy them to the other computer
+   with a USB stick, a shared folder or any cloud drive.
+2. On the other computer, check it: `Get-FileHash .\Prometheus.exe` must
+   match `SHA256SUMS.txt`.
+3. Put it in a folder you like and double-click it. Nothing is installed.
+
+(`dist\` is made on the build computer and is not part of the repository. To
+make it again: `cargo build --release`, then copy
+`target\release\rc-desktop.exe` to `dist\Prometheus.exe`.)
+
+**C. Build it yourself** on the other computer: install Rust (rustup), the
+Visual Studio Build Tools with the "Desktop development with C++" workload,
+and Git; then `git clone` this repository and run
+`cargo build --release --locked`. The program is
+`target\release\rc-desktop.exe`.
+
+### If Windows blocks it
+
+- **"Windows protected your PC" (SmartScreen):** click **More info**, then
+  **Run anyway**. This appears because the file is not signed, not because
+  anything was found in it.
+- **Smart App Control** (Windows 11, shown under *Windows Security → App &
+  browser control*): when it is **On**, it refuses unsigned programs
+  completely and there is no "Run anyway". Nothing in this project changes
+  that setting for you, and you should decide that for yourself on that
+  computer. If it is On, the options are to test on a computer where it is Off
+  or in "Evaluation" mode, or to wait until the program is signed.
+- **Antivirus** may scan a new unsigned file for a while on first start.
+
+### Step 2. The host: share the screen
+
+On the computer whose screen will be viewed:
+
+1. Start **Prometheus** (Start menu or Desktop shortcut). The first start
+   creates this computer's identity key automatically.
+2. Scroll to **Settings → Network** and tick **Let other computers connect
+   while I am sharing**. For an easier test also set **Direct connection
+   port** to `21118` (any free port above 1024; `0` picks a new one each time).
+   Press **Save settings**.
+3. In **Share this screen**: choose the **Display**. Leave control, clipboard
+   and files **off** for now (you will turn them on in Step 4). Press **Start
+   sharing**.
+4. Windows may ask whether to let Prometheus through its firewall: choose
+   **Private networks**, then **Allow access**. (You are the one to decide
+   this. If no question appears and the viewer cannot connect, see
+   "Connection problems" below.)
+5. The window now shows: *"Other computers on your network can reach this one
+   at 192.168.x.x:PORT"* and this computer's **Device key**. Keep the window
+   open: **closing it ends sharing.**
+
+### Step 3. The viewer: connect
+
+On the other computer:
+
+1. Start **Prometheus**. Go to **View a screen**.
+2. Press **Find devices on this network** and wait about 3 seconds. The host
+   appears with its name and key. Press **Connect** next to it. (If nothing
+   is found, type the address from the host's window, for example
+   `192.168.1.20:21118`, into the box and press **Connect**.)
+3. The viewer shows *"Waiting for the person at the other device to allow it"*
+   and a **six-digit code**.
+4. On the **host**, a prompt appears with the viewer's name, key and a
+   six-digit code. **The two codes must be identical.** If they differ, press
+   **Deny**: something is in between. If they match, press **Allow**.
+5. The host's screen appears in the viewer's window.
+
+### Step 4. What to try
+
+Tick the things you want on the host while it is sharing (you can change them
+at any time and the viewer is told immediately), and report what you see:
+
+| Try | How | Expected |
+|---|---|---|
+| Picture | Move windows on the host | Smooth, about 30 frames per second; status line shows the delay |
+| Control | Host: tick *Let the viewer control…*. Viewer: tick *Control the shared screen* | Viewer's mouse and keyboard act on the host; untick on the host and it stops at once |
+| Clipboard | Host: tick *clipboard sync*. Viewer: tick *Sync clipboard text*. Copy text on one, paste on the other | Text arrives; copy something from a password manager and it should **not** arrive |
+| Files | Host: tick *Let files be sent…*. Pick a file on either side | The *receiving* person is asked; the file lands in `Downloads\Prometheus` and Windows marks it as downloaded from the internet |
+| Refuse | Offer a file and press Refuse | The sender is told it was refused, nothing is written |
+| Dead link | Switch the host's Wi-Fi off for 20 s | Viewer: "No answer from the host…", then "Connection lost… Trying again…" |
+| Reconnect | Switch it back on | The host gets a **new** prompt; after Allow the picture returns |
+| End | Host: **Stop sharing** (or close the window) | Viewer: "Ended: sharing stopped" |
+
+### Step 5. Tell me what happened
+
+Useful to note: what you tried, what the window said (the red text is
+meaningful), the Windows version of both computers, and whether the network
+was Wi-Fi or cable. Logs are in `%LOCALAPPDATA%\Prometheus\data\logs` on each
+computer (one file per day). They contain devices, addresses, times and file
+sizes, never the screen, keys, clipboard text or file names.
+
+### Connection problems
+
+| Symptom | What to check |
+|---|---|
+| "Find devices" shows nothing | Same network? Host has *Let other computers connect* ticked **and** is sharing? "Let devices on the local network find this one" ticked? Some routers block device-to-device traffic (guest Wi-Fi, "client isolation"). Type the address instead |
+| "cannot connect … actively refused" | Host not sharing, or *Let other computers connect* is off, or the port is wrong |
+| Times out / no answer | Usually the host's **Windows Firewall**: Prometheus must be allowed on the *Private* profile (and is only reachable if the network is set to Private, not Public). See below |
+| "…is not the one you picked" | The device at that address has a different key than the one you chose: stop and check |
+| Black or frozen picture | The host is on the lock screen or a Windows security prompt, which cannot be shared |
+
+**Firewall by hand.** If Windows never asked, or you clicked Cancel, an
+administrator can allow the program. In an *administrator* PowerShell on the
+**host** (this changes a system setting, so do it only if you agree):
+
+```powershell
+New-NetFirewallRule -DisplayName "Prometheus" -Direction Inbound -Program "C:\path\to\Prometheus.exe" -Action Allow -Profile Private
+```
+
+(Use the real path to the installed `rc-desktop.exe`, normally
+`%LOCALAPPDATA%\Prometheus\rc-desktop.exe`, or to the portable file.) Remove it
+later with `Remove-NetFirewallRule -DisplayName "Prometheus"`.
+
+**Different networks (not the same Wi-Fi).** That needs the optional relay
+server, which has to run on a machine both can reach. See
+`docs/DEPLOYMENT.md`. Without it, the two computers must be able to reach each
+other directly.
+
+### Removing it
+
+- **Installed (A):** Settings → Apps → Prometheus → Uninstall.
+- **Portable (B):** delete `Prometheus.exe`.
+- Either way, your settings and key remain in `%APPDATA%\Prometheus`, and the
+  window's own data in `%LOCALAPPDATA%\Prometheus` and
+  `%LOCALAPPDATA%\dev.prometheus.desktop`. Delete those folders to remove
+  everything, including this computer's identity.
+
+More detail on every setting and message: `docs/USER-GUIDE.md`.
 
 ## Run a server (optional)
 

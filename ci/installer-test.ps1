@@ -2,7 +2,7 @@
 # the app, uninstalls it, and checks what is left. Fails on the first thing
 # that is not as the documentation says.
 #
-#   pwsh ci/installer-test.ps1 -Installer "target\release\bundle\nsis\Remote Desk_0.1.0_x64-setup.exe"
+#   pwsh ci/installer-test.ps1 -Installer "target\release\bundle\nsis\Prometheus_0.1.0_x64-setup.exe"
 #
 # It installs for the current user only and removes the app again. Meant for
 # a throwaway machine (CI); on your own PC it will replace an installed copy.

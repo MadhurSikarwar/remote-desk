@@ -7,7 +7,7 @@ runs in the background, and closing the window ends sharing.
 
 ## Install
 
-Run `Remote Desk_<version>_x64-setup.exe`. It installs **for your user
+Run `Prometheus_<version>_x64-setup.exe`. It installs **for your user
 only**, needs no administrator rights, installs into
 `%LOCALAPPDATA%\Prometheus`, and adds a shortcut in the Start menu and
 one on the Desktop (delete either freely).
