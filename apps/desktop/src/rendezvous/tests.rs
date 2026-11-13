@@ -480,9 +480,9 @@ mod sessions {
     ) -> (Viewing, crate::viewer::HostInfo) {
         let (viewing, tx) = viewer();
         let options = ConnectOptions {
-            expected_key: None,
             server: Some(link.clone()),
             policy,
+            ..ConnectOptions::default()
         };
         let info = viewing
             .viewer
@@ -644,9 +644,9 @@ mod sessions {
 
         let (viewing, _tx) = viewer();
         let options = ConnectOptions {
-            expected_key: None,
             server: Some(link.clone()),
             policy: TransportPolicy::DirectOnly,
+            ..ConnectOptions::default()
         };
         let error = viewing
             .viewer

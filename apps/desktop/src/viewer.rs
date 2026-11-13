@@ -7,11 +7,13 @@
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use rc_clipboard::MemoryClipboard;
 use rc_core::config::TransportPolicy;
 use rc_crypto::channel::Side;
 use rc_crypto::{fingerprint, fingerprint_bytes, parse_fingerprint, Identity, PublicKey};
@@ -20,6 +22,9 @@ use rc_protocol::{InputEvent, Message, MouseButton, Role};
 use rc_rendezvous::DeviceId;
 use serde::{Deserialize, Serialize};
 
+use crate::transfer::TransferStatus;
+
+use crate::capabilities::Capabilities;
 use crate::rendezvous::{reach, Route, ServerLink};
 use crate::secure::{establish, exchange_hello, lock, Peer, SecureReader, SecureWriter, Security};
 
@@ -215,6 +220,10 @@ pub struct ConnectOptions {
     pub server: Option<ServerLink>,
     /// Whether to connect directly, through the server, or either.
     pub policy: TransportPolicy,
+    /// Where files received from the host are saved.
+    pub received_folder: PathBuf,
+    /// Replaces the system clipboard; for tests.
+    pub clipboard: Option<MemoryClipboard>,
 }
 
 impl Default for ConnectOptions {
@@ -223,8 +232,43 @@ impl Default for ConnectOptions {
             expected_key: None,
             server: None,
             policy: TransportPolicy::Auto,
+            received_folder: std::env::temp_dir().join("rc-test-received"),
+            clipboard: None,
         }
     }
+}
+
+/// The two things that decide whether clipboard sync runs at this end.
+#[derive(Default)]
+struct ClipboardSwitches {
+    /// The host allows it (announced by the host).
+    host_allows: AtomicBool,
+    /// This person wants it.
+    wanted: AtomicBool,
+}
+
+impl ClipboardSwitches {
+    /// Sync runs only when both agree.
+    fn apply(&self, capabilities: &Capabilities) {
+        capabilities.set_clipboard(
+            self.host_allows.load(Ordering::Relaxed) && self.wanted.load(Ordering::Relaxed),
+        );
+    }
+}
+
+/// What the window shows about the clipboard and files of a session.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ViewerStatus {
+    /// The host allows clipboard sync.
+    pub clipboard_host_allows: bool,
+    /// This person has switched it on.
+    pub clipboard_wanted: bool,
+    /// It is running (both agree).
+    pub clipboard_active: bool,
+    pub clipboard_available: bool,
+    pub clipboard_sent: u64,
+    pub clipboard_received: u64,
+    pub transfers: TransferStatus,
 }
 
 /// What the user asked to connect to.
@@ -290,6 +334,8 @@ fn handshake_checked(
 }
 
 struct Connection {
+    capabilities: Arc<Capabilities>,
+    clipboard: Arc<ClipboardSwitches>,
     writer: Arc<SecureWriter>,
     closing: Arc<AtomicBool>,
     thread: JoinHandle<()>,
@@ -401,10 +447,20 @@ impl ViewerController {
         };
 
         let writer = Arc::new(writer);
+        // Both off until the host says what it allows.
+        let capabilities = Arc::new(Capabilities::new(
+            Arc::clone(&writer),
+            options.received_folder.clone(),
+            false,
+            options.clipboard.clone(),
+        ));
+        let clipboard = Arc::new(ClipboardSwitches::default());
         let closing = Arc::new(AtomicBool::new(false));
         let thread = {
             let writer = Arc::clone(&writer);
             let closing = Arc::clone(&closing);
+            let capabilities = Arc::clone(&capabilities);
+            let clipboard = Arc::clone(&clipboard);
             thread::Builder::new()
                 .name("viewer".into())
                 .spawn(move || {
@@ -415,12 +471,25 @@ impl ViewerController {
                             ControlFlow::Break(())
                         }
                         message => {
-                            if let Some(packet) = to_packet(message) {
-                                sink(packet);
+                            // What the host allows decides what this end may
+                            // do; then clipboard and file messages are dealt
+                            // with here and the rest go to the window.
+                            if let Message::Permissions(allowed) = &message {
+                                capabilities.set_files(allowed.files);
+                                clipboard
+                                    .host_allows
+                                    .store(allowed.clipboard, Ordering::Relaxed);
+                                clipboard.apply(&capabilities);
+                            }
+                            if !capabilities.handle(&message) {
+                                if let Some(packet) = to_packet(message) {
+                                    sink(packet);
+                                }
                             }
                             ControlFlow::Continue(())
                         }
                     });
+                    capabilities.end();
                     let reason = match (goodbye, outcome) {
                         (Some(reason), _) => reason,
                         _ if closing.load(Ordering::Relaxed) => "disconnected".to_owned(),
@@ -443,11 +512,51 @@ impl ViewerController {
             "connected; waiting for the host to allow viewing"
         );
         *slot = Some(Connection {
+            capabilities,
+            clipboard,
             writer,
             closing,
             thread,
         });
         Ok(host)
+    }
+
+    /// The current session's clipboard and file transfers.
+    pub fn capabilities(&self) -> Option<Arc<Capabilities>> {
+        lock(&self.connection)
+            .as_ref()
+            .map(|c| Arc::clone(&c.capabilities))
+    }
+
+    /// This person's switch for clipboard sync. It runs only while the host
+    /// also allows it.
+    pub fn set_clipboard_wanted(&self, wanted: bool) -> Result<(), String> {
+        match lock(&self.connection).as_ref() {
+            Some(connection) => {
+                connection.clipboard.wanted.store(wanted, Ordering::Relaxed);
+                connection.clipboard.apply(&connection.capabilities);
+                Ok(())
+            }
+            None => Err("Not viewing a screen".to_owned()),
+        }
+    }
+
+    /// The session's clipboard and file state, or `None` when there is no
+    /// session.
+    pub fn status(&self) -> Option<ViewerStatus> {
+        let connection = lock(&self.connection);
+        let connection = connection.as_ref().filter(|c| !c.thread.is_finished())?;
+        let capabilities = &connection.capabilities;
+        let (sent, received) = capabilities.clipboard_counts();
+        Some(ViewerStatus {
+            clipboard_host_allows: connection.clipboard.host_allows.load(Ordering::Relaxed),
+            clipboard_wanted: connection.clipboard.wanted.load(Ordering::Relaxed),
+            clipboard_active: capabilities.clipboard_enabled(),
+            clipboard_available: capabilities.clipboard_available(),
+            clipboard_sent: sent,
+            clipboard_received: received,
+            transfers: capabilities.transfers.status(),
+        })
     }
 
     fn send(&self, message: &Message) -> Result<(), String> {

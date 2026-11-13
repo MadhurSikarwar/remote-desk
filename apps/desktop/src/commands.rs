@@ -6,13 +6,15 @@ use std::time::Duration;
 use rc_core::Config;
 use rc_crypto::{fingerprint, from_hex, to_hex};
 use serde::Serialize;
+use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::rendezvous::ServerLink;
 use crate::share::{DisplaySummary, ShareController, ShareSettings, ShareStatus};
 use crate::state::{AppState, Status};
-use crate::viewer::{ConnectOptions, HostInfo, ViewerController, ViewerInput};
+use crate::transfer::{Direction, TransferStatus, Transfers};
+use crate::viewer::{ConnectOptions, HostInfo, ViewerController, ViewerInput, ViewerStatus};
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -51,6 +53,10 @@ pub fn start_share(
         max_fps: config.video.max_fps,
         bitrate_kbps: config.video.max_bitrate_kbps,
         allow_input: config.security.allow_input,
+        allow_clipboard: config.security.allow_clipboard,
+        allow_files: config.security.allow_file_transfer,
+        received_folder: state.received_folder(),
+        clipboard: None,
         server: ServerLink::from_config(&config.network)?,
         advertised_port: None,
         allow_remote: config.network.allow_remote_connections,
@@ -122,6 +128,8 @@ pub fn view_connect(
         expected_key: expected,
         server: ServerLink::from_config(&config.network)?,
         policy: config.network.transport,
+        received_folder: state.received_folder(),
+        clipboard: None,
     };
     viewer.connect_with(&address, &options, &config.device.name, move |packet| {
         // Fails only once the window is gone; the session ends with it.
@@ -219,5 +227,135 @@ pub fn forget_remembered(state: State<'_, AppState>, fingerprint: String) -> Res
         .ok_or("That device is not in the list")?;
     trust.forget(&key).map_err(|e| e.to_string())?;
     tracing::info!(fingerprint, "remembered device forgotten by the user");
+    Ok(())
+}
+
+/// The host's switch for clipboard text sync.
+#[tauri::command]
+pub fn set_share_clipboard(share: State<'_, ShareController>, allowed: bool) -> ShareStatus {
+    let status = share.set_clipboard_allowed(allowed);
+    tracing::info!(allowed, "clipboard sync switched by the user");
+    status
+}
+
+/// The host's switch for file transfer.
+#[tauri::command]
+pub fn set_share_files(share: State<'_, ShareController>, allowed: bool) -> ShareStatus {
+    let status = share.set_files_allowed(allowed);
+    tracing::info!(allowed, "file transfer switched by the user");
+    status
+}
+
+/// The viewer's own switch for clipboard text sync, which also needs the
+/// host to allow it.
+#[tauri::command]
+pub fn set_view_clipboard(viewer: State<'_, ViewerController>, wanted: bool) -> Result<(), String> {
+    viewer.set_clipboard_wanted(wanted)?;
+    tracing::info!(wanted, "clipboard sync switched by the user (viewer)");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn view_capability_status(viewer: State<'_, ViewerController>) -> Option<ViewerStatus> {
+    viewer.status()
+}
+
+/// The file transfers of the host's or the viewer's session.
+fn transfers_of(
+    role: &str,
+    share: &ShareController,
+    viewer: &ViewerController,
+) -> Result<Arc<Transfers>, String> {
+    let capabilities = match role {
+        "host" => share.capabilities(),
+        "viewer" => viewer.capabilities(),
+        _ => return Err("Unknown role".to_owned()),
+    };
+    capabilities
+        .map(|c| Arc::clone(&c.transfers))
+        .ok_or_else(|| "There is no session to transfer files in".to_owned())
+}
+
+#[tauri::command]
+pub fn transfer_status(
+    role: String,
+    share: State<'_, ShareController>,
+    viewer: State<'_, ViewerController>,
+) -> Result<TransferStatus, String> {
+    Ok(transfers_of(&role, &share, &viewer)?.status())
+}
+
+/// The person's answer to a file offered by the other end. Only ever called
+/// from the Accept and Refuse buttons.
+#[tauri::command]
+pub fn transfer_answer(
+    role: String,
+    id: u32,
+    accept: bool,
+    share: State<'_, ShareController>,
+    viewer: State<'_, ViewerController>,
+) -> Result<(), String> {
+    transfers_of(&role, &share, &viewer)?.answer(id, accept)?;
+    tracing::info!(role, id, accept, "file offer answered by the user");
+    Ok(())
+}
+
+/// Offers a file the person picked. Returns the transfer's number.
+#[tauri::command]
+pub fn transfer_offer(
+    role: String,
+    name: String,
+    size: u64,
+    share: State<'_, ShareController>,
+    viewer: State<'_, ViewerController>,
+) -> Result<u32, String> {
+    transfers_of(&role, &share, &viewer)?.offer(&name, size)
+}
+
+/// Sends the next piece of a file. The bytes are the request body; `role`
+/// and `id` are headers.
+#[tauri::command(async)]
+pub fn transfer_chunk(
+    request: tauri::ipc::Request<'_>,
+    share: State<'_, ShareController>,
+    viewer: State<'_, ViewerController>,
+) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("The file data must be sent as raw bytes".to_owned());
+    };
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("missing {name} header"))
+    };
+    let role = header("x-role")?;
+    let id: u32 = header("x-id")?
+        .parse()
+        .map_err(|_| "bad transfer number".to_owned())?;
+    transfers_of(&role, &share, &viewer)?.chunk(id, bytes)
+}
+
+#[tauri::command]
+pub fn transfer_finish(
+    role: String,
+    id: u32,
+    share: State<'_, ShareController>,
+    viewer: State<'_, ViewerController>,
+) -> Result<(), String> {
+    transfers_of(&role, &share, &viewer)?.finish(id)
+}
+
+#[tauri::command]
+pub fn transfer_cancel(
+    role: String,
+    direction: Direction,
+    id: u32,
+    share: State<'_, ShareController>,
+    viewer: State<'_, ViewerController>,
+) -> Result<(), String> {
+    transfers_of(&role, &share, &viewer)?.cancel(direction, id);
     Ok(())
 }
