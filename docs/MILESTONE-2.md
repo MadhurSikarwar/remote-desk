@@ -47,8 +47,12 @@ Complete, with one open observation (see the end).
   process's DPI awareness.
 - The frame-rate limit uses fixed deadlines rather than "sleep the rest of the
   interval".
-- Rotated displays are listed with their rotation, but frames are delivered
-  unrotated. Not handled yet.
+- Rotated displays are listed with their rotation, but frames were delivered
+  unrotated. *Fixed afterwards (see the Prometheus review fixes): a rotated
+  monitor's picture is turned the right way up in `rc-capture` and sized as
+  the display reports. The turns are checked against Microsoft's diagrams
+  with unit tests; **no rotated monitor was available, so this has never run
+  on real rotated hardware**.*
 
 ## Problems found and fixed
 

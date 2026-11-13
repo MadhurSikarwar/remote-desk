@@ -14,12 +14,13 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_ROTATE90,
+    DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
+    DXGI_MODE_ROTATION_ROTATE90,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
     IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
-    DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_ERROR_UNSUPPORTED, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
 };
 
 use windows::Win32::UI::HiDpi::{
@@ -27,7 +28,17 @@ use windows::Win32::UI::HiDpi::{
 };
 
 use crate::frame::{copy_rows, Frame};
+use crate::rotate::upright;
 use crate::{CaptureError, DisplayInfo, Rotation};
+
+fn rotation_of(rotation: DXGI_MODE_ROTATION) -> Rotation {
+    match rotation {
+        DXGI_MODE_ROTATION_ROTATE90 => Rotation::Deg90,
+        DXGI_MODE_ROTATION_ROTATE180 => Rotation::Deg180,
+        DXGI_MODE_ROTATION_ROTATE270 => Rotation::Deg270,
+        _ => Rotation::None,
+    }
+}
 
 fn platform(e: windows::core::Error) -> CaptureError {
     if e.code() == E_ACCESSDENIED {
@@ -96,12 +107,7 @@ fn enumerate() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput, DisplayInfo)>, Capture
                     continue;
                 }
                 let rect = desc.DesktopCoordinates;
-                let rotation = match desc.Rotation {
-                    DXGI_MODE_ROTATION_ROTATE90 => Rotation::Deg90,
-                    DXGI_MODE_ROTATION_ROTATE180 => Rotation::Deg180,
-                    DXGI_MODE_ROTATION_ROTATE270 => Rotation::Deg270,
-                    _ => Rotation::None,
-                };
+                let rotation = rotation_of(desc.Rotation);
                 let info = DisplayInfo {
                     index: found.len(),
                     name: wide_to_string(&desc.DeviceName),
@@ -128,6 +134,9 @@ pub fn list_displays() -> Result<Vec<DisplayInfo>, CaptureError> {
 struct Session {
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
+    /// How the surfaces this duplication delivers are rotated: they come in
+    /// the monitor's unrotated orientation (see [`crate::rotate`]).
+    rotation: Rotation,
     /// CPU-readable copy target, created on the first frame and whenever the
     /// frame size changes.
     staging: Option<(ID3D11Texture2D, u32, u32)>,
@@ -165,10 +174,12 @@ impl Session {
 
             let output1: IDXGIOutput1 = output.cast().map_err(platform)?;
             let duplication = output1.DuplicateOutput(&device).map_err(platform)?;
+            let duplicated: DXGI_OUTDUPL_DESC = duplication.GetDesc();
 
             Ok((
                 Self {
                     context,
+                    rotation: rotation_of(duplicated.Rotation),
                     duplication,
                     staging: None,
                     device,
@@ -214,6 +225,8 @@ pub struct Capturer {
     info: DisplayInfo,
     session: Option<Session>,
     buffer: Vec<u8>,
+    /// The picture turned the right way up, for a rotated monitor.
+    upright: Vec<u8>,
 }
 
 impl Capturer {
@@ -226,6 +239,7 @@ impl Capturer {
             info,
             session: Some(session),
             buffer: Vec::new(),
+            upright: Vec::new(),
         })
     }
 
@@ -312,10 +326,29 @@ impl Capturer {
             copy_rows(source, pitch, &mut self.buffer, row_bytes, height as usize);
             session.context.Unmap(&staging, 0);
 
+            // A rotated monitor delivers its picture inside an unrotated
+            // surface: turn it the right way up, so the picture, its size and
+            // the display's own rectangle all agree.
+            let rotation = session.rotation;
+            if rotation == Rotation::None {
+                return Ok(Some(Frame {
+                    width,
+                    height,
+                    data: &self.buffer,
+                    accumulated_updates: frame_info.AccumulatedFrames,
+                }));
+            }
+            let (out_width, out_height) = upright(
+                &self.buffer,
+                width as usize,
+                height as usize,
+                rotation,
+                &mut self.upright,
+            );
             Ok(Some(Frame {
-                width,
-                height,
-                data: &self.buffer,
+                width: out_width as u32,
+                height: out_height as u32,
+                data: &self.upright,
                 accumulated_updates: frame_info.AccumulatedFrames,
             }))
         }

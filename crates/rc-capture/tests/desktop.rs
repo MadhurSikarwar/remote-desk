@@ -37,9 +37,10 @@ fn first_frame_matches_the_display() {
     loop {
         if let Some(frame) = capturer.next_frame(500).unwrap() {
             assert_eq!(frame.data.len(), frame.stride() * frame.height as usize);
-            if info.rotation == Rotation::None {
-                assert_eq!((frame.width, frame.height), (info.width, info.height));
-            }
+            // For every rotation: the frame is the desktop as seen, in the size
+            // the display reports (a rotated monitor's surface is turned).
+            assert_eq!((frame.width, frame.height), (info.width, info.height));
+            let _ = Rotation::None;
             assert!(
                 frame.data.iter().any(|&b| b != 0),
                 "frame is entirely black"

@@ -5,6 +5,7 @@
 //! job, and nothing here starts capturing on its own.
 
 mod frame;
+pub mod rotate;
 
 #[cfg(windows)]
 mod dxgi;
