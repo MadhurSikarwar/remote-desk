@@ -305,9 +305,14 @@ struct Inner {
 }
 
 impl Inner {
+    /// The newest entry with this number. A number is not used twice in a
+    /// session by an honest peer, but finished entries are kept for a while,
+    /// so if one is ever offered again the live entry must win over the
+    /// retained one, not the other way round.
     fn find(&mut self, direction: Direction, id: u32) -> Option<&mut Entry> {
         self.entries
             .iter_mut()
+            .rev()
             .find(|e| e.direction == direction && e.id == id)
     }
 
@@ -553,12 +558,20 @@ impl Transfers {
         if size > MAX_FILE_BYTES {
             return refuse("the file is too large", replies);
         }
-        if inner
+        // Refused whatever became of the earlier transfer with this number:
+        // an entry that is kept after it finished would otherwise be found
+        // first, and the new offer could never be answered.
+        if let Some(earlier) = inner
             .entries
             .iter()
-            .any(|e| e.direction == Direction::Incoming && e.id == id && e.state.active())
+            .find(|e| e.direction == Direction::Incoming && e.id == id)
         {
-            return refuse("that transfer number is already in use", replies);
+            let reason = if earlier.state.active() {
+                "that transfer number is already in use"
+            } else {
+                "that transfer number was already used"
+            };
+            return refuse(reason, replies);
         }
         if inner.active(Direction::Incoming) >= MAX_INCOMING {
             return refuse("too many files are waiting", replies);

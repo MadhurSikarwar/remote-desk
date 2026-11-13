@@ -714,3 +714,61 @@ fn a_file_is_still_saved_and_the_person_is_told_when_it_could_not_be_marked() {
     // The sender still hears that it arrived.
     assert_eq!(item(&pair.a).detail.as_deref(), Some("delivered"));
 }
+
+#[test]
+fn a_finished_transfers_number_cannot_be_offered_again() {
+    let pair = Pair::new(true, true);
+    let first = pair.offer_and_accept("one.txt", 3);
+    assert_eq!(first, 1);
+    pair.send_all(first, b"abc");
+    assert_eq!(item(&pair.b).state, State::Finished);
+
+    // The sender (here, a raw message) uses the same number again.
+    lock(&pair.to_b).clear();
+    lock(&pair.to_a).clear();
+    pair.b.handle(&Message::FileOffer {
+        id: first,
+        name: "two.txt".into(),
+        size: 3,
+    });
+    let refusal = lock(&pair.to_a).pop_back();
+    assert!(
+        matches!(&refusal, Some(Message::FileAnswer { accept: false, reason, .. }) if reason.contains("already used")),
+        "{refusal:?}"
+    );
+    // Nothing waits for an answer that could never be given.
+    assert!(
+        pair.b
+            .status()
+            .items
+            .iter()
+            .all(|i| i.state == State::Finished),
+        "{:?}",
+        pair.b.status().items
+    );
+    assert_eq!(pair.b.status().items.len(), 1);
+}
+
+#[test]
+fn a_lookup_finds_the_newest_entry_with_a_number() {
+    let entry = |state, detail: &str| Entry {
+        direction: Direction::Incoming,
+        id: 9,
+        name: "x".into(),
+        size: 1,
+        done: 0,
+        state,
+        detail: Some(detail.to_owned()),
+        deadline: None,
+        work: Work::None,
+    };
+    let mut inner = Inner {
+        next_id: 1,
+        entries: vec![
+            entry(State::Finished, "old"),
+            entry(State::WaitingForYou, "new"),
+        ],
+    };
+    let found = inner.find(Direction::Incoming, 9).unwrap();
+    assert_eq!(found.detail.as_deref(), Some("new"));
+}
