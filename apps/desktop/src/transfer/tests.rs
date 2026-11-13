@@ -12,7 +12,7 @@ struct Pair {
     b: Transfers,
     to_b: Queue,
     to_a: Queue,
-    dir_a: tempfile::TempDir,
+    _dir_a: tempfile::TempDir,
     dir_b: tempfile::TempDir,
 }
 
@@ -32,7 +32,7 @@ impl Pair {
             b: Transfers::new(dir_b.path().join("received"), b_allowed, sender(&to_a)),
             to_b,
             to_a,
-            dir_a,
+            _dir_a: dir_a,
             dir_b,
         }
     }
