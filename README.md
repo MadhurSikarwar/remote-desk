@@ -1,4 +1,4 @@
-# Remote Control
+# Remote Desk
 
 A remote-desktop application for Windows, inspired by RustDesk, built around
 one rule: **the person at the shared computer decides, every time.** Rust,
@@ -12,6 +12,13 @@ bandwidth limits). It has **not been tested across two separate computers
 or the internet**, has had **no independent security review**, and the
 installer is **not code-signed**. Read `docs/SECURITY.md` before relying on
 it.
+
+*Named "Remote Control" until the end of Milestone 10; the milestone records
+in `docs/` still use that name for what they measured. Settings and keys
+now live in `%APPDATA%\RemoteDesk` (a copy made under the old name is not
+picked up), and received files go to `Downloads\Remote Desk`. The labels
+inside the key and handshake derivations still say "RemoteControl" on
+purpose: changing them would change what identities and codes compute.*
 
 ## What it does
 
@@ -30,7 +37,7 @@ background or hidden, run commands remotely, record, or carry audio.
 
 ## Install and use
 
-Windows 10 or 11. Get `Remote Control_<version>_x64-setup.exe` (see
+Windows 10 or 11. Get `Remote Desk_<version>_x64-setup.exe` (see
 `docs/RELEASING.md`; there is no published release yet) and read
 `docs/USER-GUIDE.md`. The installer is per-user and needs no administrator
 rights. It is unsigned: Windows will warn.

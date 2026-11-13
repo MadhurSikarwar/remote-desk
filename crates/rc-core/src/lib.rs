@@ -1,4 +1,4 @@
-//! Shared foundation for Remote Control: configuration, file locations and
+//! Shared foundation for Remote Desk: configuration, file locations and
 //! structured logging. Nothing in this crate touches the screen, the network
 //! or input devices.
 

@@ -1,6 +1,6 @@
 [package]
 name = "rc-crypto"
-description = "Device identity, encrypted channel and trusted devices for Remote Control"
+description = "Device identity, encrypted channel and trusted devices for Remote Desk"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

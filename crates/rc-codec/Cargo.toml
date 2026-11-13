@@ -1,6 +1,6 @@
 [package]
 name = "rc-codec"
-description = "Video encoding for Remote Control (H.264 through Media Foundation)"
+description = "Video encoding for Remote Desk (H.264 through Media Foundation)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

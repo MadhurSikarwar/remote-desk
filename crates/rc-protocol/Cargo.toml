@@ -1,6 +1,6 @@
 [package]
 name = "rc-protocol"
-description = "Wire messages exchanged between Remote Control devices"
+description = "Wire messages exchanged between Remote Desk devices"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

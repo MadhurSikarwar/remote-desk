@@ -1,6 +1,6 @@
 [package]
 name = "rc-desktop"
-description = "Remote Control desktop application"
+description = "Remote Desk desktop application"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

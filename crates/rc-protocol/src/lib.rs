@@ -1,4 +1,4 @@
-//! Wire protocol between two Remote Control devices.
+//! Wire protocol between two Remote Desk devices.
 //!
 //! A connection carries a sequence of messages. Each one is framed as
 //!

@@ -8,7 +8,7 @@ there is no update mechanism.
 
 | Output | From | How |
 |---|---|---|
-| `Remote Control_<version>_x64-setup.exe` | `apps/desktop` | Tauri 2 with an NSIS installer, per-user |
+| `Remote Desk_<version>_x64-setup.exe` | `apps/desktop` | Tauri 2 with an NSIS installer, per-user |
 | `rc-server` (Linux x86_64) and `rc-server-linux-x86_64.tar.gz` | `apps/server` | `cargo build --release -p rc-server` |
 | `rc-server:<tag>` image | `deploy/Dockerfile` | `docker build -f deploy/Dockerfile .` |
 | `SHA256SUMS.txt` | the two above | `sha256sum` in CI |
@@ -45,7 +45,7 @@ cd apps\desktop
 cargo tauri build
 ```
 
-Output: `target\release\bundle\nsis\Remote Control_0.1.0_x64-setup.exe`.
+Output: `target\release\bundle\nsis\Remote Desk_0.1.0_x64-setup.exe`.
 
 The first build downloads the NSIS toolset (nsis-3.13) from GitHub through
 the Tauri CLI. **That download failed from this development machine** ("An
@@ -57,7 +57,7 @@ documentation for the cache folder and expected files.
 Check an installer on a **throwaway machine**:
 
 ```powershell
-pwsh ci\installer-test.ps1 -Installer "target\release\bundle\nsis\Remote Control_0.1.0_x64-setup.exe"
+pwsh ci\installer-test.ps1 -Installer "target\release\bundle\nsis\Remote Desk_0.1.0_x64-setup.exe"
 ```
 
 It installs silently for the current user, checks where files went and that
