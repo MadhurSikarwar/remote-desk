@@ -24,7 +24,9 @@ below are a single spot measurement, not a benchmark.
 
 ## How it works
 
-**Keepalive.** Once a session is allowed, each end pings the other every 5 s
+**Keepalive.** Once a session is allowed, each end pings the other four times
+a second (every 5 s when this was first written; see "Keeping up with the
+connection" for why it changed)
 and answers the other's pings. If *nothing at all* (a ping, a pong, video,
 input) arrives for 15 s, the link is declared dead and the connection is
 closed, so the session ends with a reason instead of hanging. Nothing is
@@ -32,7 +34,7 @@ sent and nothing times out while a viewer is still waiting for the host's
 approval; the person at the host may take as long as the approval timeout.
 
 Each ping is about 31 bytes on the wire (from the record format, not
-measured), per direction every 5 s.
+measured), so about 1 kbit/s in each direction.
 
 **Two threads, on purpose.** One thread only watches the clock and decides;
 another sends the pings. A write to a dead connection can block until the
@@ -49,6 +51,26 @@ relayed session ended after 15 minutes); it is fixed. Test: a relay that
 closes after 1.2 s of silence carried a still-or-moving session for 4.5 s.
 With pings turned off the same test fails ("the host lost the viewer"), so
 the test does show the effect.
+
+**Keeping up with the connection.** Added after the network tests (see
+`NETWORK-TESTS.md`) showed a link slightly too slow leaving the picture 26 s
+behind. The host cannot see the buffers on the way, but its pings wait in
+them behind the video, so their round trip shows the wait. Rule, in
+`apps/desktop/src/congestion.rs`:
+
+- Queueing delay is the round trip (or how long the oldest unanswered ping
+  has waited) minus the lowest round trip of the last 10 s.
+- Above 300 ms: stop sending video until it is back under 100 ms, and aim
+  the encoder at a lower bit rate (cut to 70%, then halved for each further
+  second of waiting, never below 150 kbit/s).
+- Under 100 ms: raise the bit rate again, quickly back to just under where
+  the trouble was, gently beyond it, quickly again after a clear spell.
+- A session starts at 30% of the maximum and works up.
+
+Frames are skipped before they are encoded, so the viewer never misses a
+frame the next one depends on. The host's window says when it is doing this
+("Video limited to 0.4 of 8.0 Mbit/s for this connection", "Holding video
+back"). `video.adaptive_quality = false` turns it off.
 
 **Lost, not ended.** The window is told one of two things:
 
@@ -96,6 +118,14 @@ real mouse movement in that window would do it; **that is a hypothesis, not
 confirmed.** `cargo fmt --check` and clippy (`-D warnings`) were clean. The
 node tests run in CI.
 
+Added with the rate control: `congestion` (7, against a simulated path:
+a slow path stays under 0.4 s behind once settled while about 95% of its
+capacity is used, the rate returns when the path recovers, a path that gets
+longer is not mistaken for a full one, limits and hold marks); `rc-codec` (3:
+the bit rate changes while encoding, it causes no keyframe, an encoder
+created low can be raised); `link` (1: the baseline is the lowest *recent*
+round trip). Whole workspace after that: 264 passed, twice in a row.
+
 ## Measured in a live run (two app instances, one computer)
 
 - **Host process killed**, then restarted on the same port: the viewer said
@@ -127,12 +157,21 @@ node tests run in CI.
   host again after it re-registers, but that path was only covered by the
   existing Milestone 7 tests, not by a reconnect test.
 - **Sleep, hibernate and network changes** (Wi-Fi to cable) were not tried.
-- **A link slower than the video needs makes the picture lag by tens of
-  seconds** and nothing reacts (measured through a Linux relay in WSL with a
-  bandwidth cap; see `NETWORK-TESTS.md`).
-- **`video.adaptive_quality` does nothing.** The setting exists and defaults
-  to true, but no code reads it: the encoder runs at the configured bitrate
-  whatever the link does. Nothing here measured or adapted to bandwidth.
+- **Under a bandwidth cap the video rate is cautious and uneven.** In the
+  live runs it used between about a third and nearly all of a 0.8 Mbit/s
+  link (0.21, 0.29, 0.40 and 0.71 Mbit/s in four 10 s samples). I did not
+  establish why it varies; large keyframes every 4 s are a likely cause, not
+  a confirmed one. The picture stays close to live either way.
+- **The encoder's bit rate is a target, not a limit.** On very busy pictures
+  the Windows software encoder overshoots it by a wide margin (a synthetic
+  worst case produced over 30 Mbit/s whatever was asked for). Holding frames
+  back is what bounds the lag then, at the cost of frame rate.
+- **Delay with jitter is still poor**: about 13 frames per second and 0.4 to
+  1.3 s behind at 100 ms delay with 20 ms jitter. netem's jitter reorders
+  packets, which TCP handles badly; a real path may behave better.
+- **Tuning.** The 300/100 ms marks, the step sizes and the 10 s baseline are
+  my choices, checked against a simulation and three live scenarios, not
+  tuned on real links.
 - **Two computers, a real network, packet loss, high latency:** not tested.
   The 15 s / 5 s timings are my choice, not tuned on real links.
 - Still open from Milestone 7: no TLS/WebSocket wrapping for networks that
@@ -143,5 +182,5 @@ node tests run in CI.
 
 Milestone 10 is for you to define. Candidates from what is still open:
 packaging (installer, update story), a security review of the whole design,
-user documentation, bandwidth adaptation (the unused `adaptive_quality`
-setting), and the network gaps above (TLS/WebSocket, hole punching).
+user documentation, and the network gaps above (TLS/WebSocket, hole
+punching).

@@ -3,8 +3,9 @@
 Two computers were not available, so the relay and the network paths were
 exercised with what one Windows PC has: a Linux relay server in WSL (a real
 virtual network card, a separate network stack), `tc netem` in WSL to damage
-that path, and the PC's own Wi-Fi address. Run on 2026-11-13 with the release
-build of commit 0669411.
+that path, and the PC's own Wi-Fi address. Run on 2026-11-13: first with the
+release build of commit 0669411 ("Results"), then again after the fix the
+first run led to ("After the fix").
 
 **What this is not.** The host and the viewer are still two processes on the
 same Windows machine, behind no NAT and no router. It says nothing about NAT
@@ -44,17 +45,40 @@ Every number below is one run; none is a benchmark.
 | Connect through the found device (direct, over the Wi-Fi address) | Worked: route "directly"; the connection ran from the PC's Wi-Fi address to itself, not loopback; approval prompt; 30 fps |
 | Host with "let other computers connect" off, viewer to the Wi-Fi address | Refused: "actively refused it". The same host accepted loopback |
 
+## After the fix
+
+The first run led to the rate control described in `MILESTONE-9.md`
+("Keeping up with the connection"). The same scenarios, same setup, with it:
+
+| Test | Before | After |
+|---|---|---|
+| Cap of 0.8 Mbit/s, moving pattern, about 50 s | 7.8 s behind after 10 s; round trip 26 s after 40 s | 34–214 ms behind across three runs, 16–35 fps; the host's window showed "Video limited to 0.1–0.5 of 8.0 Mbit/s"; it sent 0.21, 0.29, 0.40 and 0.71 Mbit/s in four 10 s samples |
+| Cap removed | Recovered in about 8 s | 30 fps and 10–14 ms within 10 s; bit rate back at the maximum within about 30 s in two runs, at 4.9 of 8.0 Mbit/s after 25 s in the third |
+| Delay 100 ms with 20 ms jitter, 60 s | 9 fps and 3.9 s behind after 20 s, still worsening | About 13 fps on average, 0.4–1.3 s behind, at the minimum bit rate; 30 fps again 12 s after removing it |
+| First 10 s of a session, moving pattern | not measured | 0.99 Mbit/s (it starts at 30% and works up) |
+
+Two faults were found and fixed on the way, both by these live runs and not
+by the tests I had written first:
+
+1. **A bit rate set before the encoder's first frame was ignored**, so the
+   gentle start did nothing and 8.2 Mbit/s went out early in a session. The encoder
+   is now created at the starting rate.
+2. **The video stopped for good after the path got longer.** With the 100 ms
+   delay added, the round trip settled at about 180 ms; measured against the
+   lowest round trip *ever* seen (0.7 ms) that looked like 180 ms of
+   queueing, which is neither over the mark for holding nor under the mark
+   for releasing, so a hold that had started never ended (frames stopped at
+   4337 for over 20 s). Queueing is now measured against the lowest round
+   trip of the last 10 s. A simulation of exactly this fails without the
+   change (video held 83% of the time, nothing delivered afterwards) and
+   passes with it.
+
 ## What it found
 
-1. **A link slower than the video needs makes the picture lag by tens of
-   seconds, and nothing reacts.** The host keeps sending at its own rate;
-   the excess waits in buffers on the way. The pings wait in the same
-   buffers, so the measured round trip shows the lag, but the keepalive only
-   asks "is anything arriving?", so the session stays up. The lag is far
-   worse than a degraded picture would be. This is the missing bandwidth
-   adaptation (the `video.adaptive_quality` setting exists and is unused).
-   The round-trip time the pings already measure is a usable signal for
-   fixing it: it rose from 1 ms to over 17 s while the cap was on.
+1. **A link slower than the video needs made the picture lag by tens of
+   seconds, and nothing reacted.** The host kept sending at its own rate; the
+   excess waited in buffers on the way. The keepalive only asks "is anything
+   arriving?", so the session stayed up. Fixed; see "After the fix".
 2. The 15 s dead-link detection and the reconnect flow work on a real
    non-loopback path, with both ends noticing independently.
 3. Nothing found that depends on loopback: direct connection by Wi-Fi
