@@ -23,7 +23,7 @@
 //!   starve the screen it shares a connection with.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -139,8 +139,21 @@ pub fn safe_file_name(name: &str) -> String {
     cleaned
 }
 
+/// A file name split before its extension: `report.pdf` is `report` and
+/// `.pdf`; a name that only starts with a dot has no extension.
+fn split_name(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
+        _ => (name, ""),
+    }
+}
+
 /// `name`, or `name (1)`, `name (2)`… before the extension, whichever does
 /// not exist yet in `dir` (also counting a `.part` file being written).
+///
+/// This only chooses a name for the file to be written under. Whether the
+/// name is still free when the file is finished is decided by
+/// [`finalize_without_replacing`], not by this look.
 fn unused_name(dir: &Path, name: &str) -> PathBuf {
     let taken = |candidate: &str| {
         dir.join(candidate).exists() || dir.join(format!("{candidate}.part")).exists()
@@ -148,10 +161,7 @@ fn unused_name(dir: &Path, name: &str) -> PathBuf {
     if !taken(name) {
         return dir.join(name);
     }
-    let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
-        _ => (name, ""),
-    };
+    let (stem, ext) = split_name(name);
     for n in 1..10_000 {
         let candidate = format!("{stem} ({n}){ext}");
         if !taken(&candidate) {
@@ -159,6 +169,56 @@ fn unused_name(dir: &Path, name: &str) -> PathBuf {
         }
     }
     dir.join(format!("{stem} (copy){ext}"))
+}
+
+/// Moves the finished file `part` to `wanted`, or to `wanted (1)`, `(2)`…
+/// when that name is taken, and never replaces a file that exists.
+///
+/// Looking for a free name and then renaming is not safe: a rename replaces
+/// an existing file (on Windows and on Unix), and another program may create
+/// the file between the look and the rename. So the name is claimed first
+/// with `create_new`, which only one caller can win, and the finished file is
+/// then moved over that empty placeholder of ours.
+fn finalize_without_replacing(part: &Path, wanted: &Path) -> io::Result<PathBuf> {
+    let dir = wanted.parent().unwrap_or_else(|| Path::new("."));
+    let name = wanted
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let (stem, ext) = split_name(&name);
+    for n in 0..10_000 {
+        let candidate = if n == 0 {
+            wanted.to_path_buf()
+        } else {
+            dir.join(format!("{stem} ({n}){ext}"))
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(placeholder) => {
+                drop(placeholder);
+                return match fs::rename(part, &candidate) {
+                    Ok(()) => Ok(candidate),
+                    Err(e) => {
+                        let _ = fs::remove_file(&candidate);
+                        Err(e)
+                    }
+                };
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            // Windows says "access denied", not "exists", when the name
+            // belongs to a folder. Taken either way; a folder that cannot be
+            // written to at all is still an error (nothing is there).
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && candidate.exists() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free name was found for the file",
+    ))
 }
 
 /// Marks a saved file as having come from another computer, so Windows
@@ -569,21 +629,15 @@ impl Transfers {
             return fail(entry, "the file arrived damaged and was deleted");
         }
         drop(file);
-        // The name may have been taken while the file was coming.
-        let name = target
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let dir = target.parent().unwrap_or_else(|| Path::new("."));
-        let final_path = if target.exists() {
-            unused_name(dir, &name)
-        } else {
-            target
+        // The name may have been taken while the file was coming, even a
+        // moment ago: it is claimed here, never assumed.
+        let final_path = match finalize_without_replacing(&part, &target) {
+            Ok(path) => path,
+            Err(e) => {
+                let _ = fs::remove_file(&part);
+                return fail(entry, &format!("cannot save the file: {e}"));
+            }
         };
-        if let Err(e) = fs::rename(&part, &final_path) {
-            let _ = fs::remove_file(&part);
-            return fail(entry, &format!("cannot save the file: {e}"));
-        }
         mark_as_downloaded(&final_path);
         entry.state = State::Finished;
         entry.detail = Some(format!("saved as {}", final_path.display()));

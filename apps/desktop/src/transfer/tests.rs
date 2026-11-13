@@ -595,3 +595,75 @@ fn dropping_the_transfers_removes_half_written_files() {
     drop(b);
     assert!(files_in(&dir_b.path().join("received")).is_empty());
 }
+
+#[test]
+fn finishing_a_file_never_replaces_one_that_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let wanted = dir.path().join("report.pdf");
+    fs::write(&wanted, "somebody else's file").unwrap();
+    let part = dir.path().join("report.pdf.part");
+    fs::write(&part, "the received file").unwrap();
+
+    let saved = finalize_without_replacing(&part, &wanted).unwrap();
+
+    assert_eq!(saved, dir.path().join("report (1).pdf"));
+    assert_eq!(fs::read_to_string(&wanted).unwrap(), "somebody else's file");
+    assert_eq!(fs::read_to_string(&saved).unwrap(), "the received file");
+    assert!(!part.exists());
+    assert_eq!(
+        files_in(dir.path()),
+        ["report (1).pdf", "report.pdf"],
+        "nothing else is left in the folder"
+    );
+}
+
+#[test]
+fn many_files_finishing_at_once_under_one_name_all_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    let wanted = dir.path().join("same.txt");
+    let count = 24;
+    let start = Arc::new(std::sync::Barrier::new(count));
+    let threads: Vec<_> = (0..count)
+        .map(|i| {
+            let (dir, wanted, start) = (dir.path().to_path_buf(), wanted.clone(), start.clone());
+            std::thread::spawn(move || {
+                let part = dir.join(format!("part-{i}"));
+                fs::write(&part, format!("content {i}")).unwrap();
+                start.wait();
+                (i, finalize_without_replacing(&part, &wanted).unwrap())
+            })
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for thread in threads {
+        let (i, saved) = thread.join().unwrap();
+        assert!(
+            seen.insert(saved.clone()),
+            "two files were saved as {saved:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&saved).unwrap(),
+            format!("content {i}"),
+            "{saved:?} holds another file's content: a file was overwritten"
+        );
+    }
+    assert_eq!(files_in(dir.path()).len(), count);
+}
+
+#[test]
+fn a_directory_in_the_way_is_not_replaced_either() {
+    let dir = tempfile::tempdir().unwrap();
+    let wanted = dir.path().join("data");
+    fs::create_dir(&wanted).unwrap();
+    fs::write(wanted.join("inside.txt"), "kept").unwrap();
+    let part = dir.path().join("data.part");
+    fs::write(&part, "the received file").unwrap();
+
+    let saved = finalize_without_replacing(&part, &wanted).unwrap();
+
+    assert_eq!(saved, dir.path().join("data (1)"));
+    assert_eq!(
+        fs::read_to_string(wanted.join("inside.txt")).unwrap(),
+        "kept"
+    );
+}
