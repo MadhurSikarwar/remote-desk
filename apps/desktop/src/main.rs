@@ -5,6 +5,7 @@ mod rendezvous;
 mod secure;
 mod share;
 mod state;
+mod transfer;
 mod viewer;
 
 use std::sync::atomic::{AtomicBool, Ordering};

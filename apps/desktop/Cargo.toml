@@ -18,6 +18,7 @@ rc-net = { path = "../../crates/rc-net" }
 rc-protocol = { path = "../../crates/rc-protocol" }
 rc-rendezvous = { path = "../../crates/rc-rendezvous" }
 serde.workspace = true
+sha2 = "0.10"
 tauri.workspace = true
 tracing.workspace = true
 
