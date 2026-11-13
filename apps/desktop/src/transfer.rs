@@ -225,15 +225,24 @@ fn finalize_without_replacing(part: &Path, wanted: &Path) -> io::Result<PathBuf>
 /// warns before it is run (an NTFS stream). Other systems have no mark that
 /// is set this way (macOS has a quarantine attribute, not done yet), and the
 /// stream name must not be used there: it would make a stray file.
+///
+/// Not every drive can hold the mark (FAT and exFAT volumes, some network
+/// shares and synced folders cannot), so this can fail; the caller says so.
 #[cfg(windows)]
-fn mark_as_downloaded(path: &Path) {
+fn mark_as_downloaded(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if tests::MARK_FAILS.with(std::cell::Cell::get) {
+        return Err(io::Error::other("this test made it fail"));
+    }
     let mut stream = path.as_os_str().to_owned();
     stream.push(":Zone.Identifier");
-    let _ = fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
+    fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n")
 }
 
 #[cfg(not(windows))]
-fn mark_as_downloaded(_path: &Path) {}
+fn mark_as_downloaded(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 enum Work {
     None,
@@ -638,9 +647,17 @@ impl Transfers {
                 return fail(entry, &format!("cannot save the file: {e}"));
             }
         };
-        mark_as_downloaded(&final_path);
+        // The file is saved either way; the person is told if Windows will not
+        // know where it came from.
+        let note = match mark_as_downloaded(&final_path) {
+            Ok(()) => String::new(),
+            Err(error) => {
+                tracing::warn!(%error, "a received file could not be marked as downloaded");
+                format!(" (could not be marked as downloaded from another computer: {error})")
+            }
+        };
         entry.state = State::Finished;
-        entry.detail = Some(format!("saved as {}", final_path.display()));
+        entry.detail = Some(format!("saved as {}{note}", final_path.display()));
         replies.push(Message::FileDone { id });
         tracing::info!(id, size = entry.size, "a file was received and checked");
     }

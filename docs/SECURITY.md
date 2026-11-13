@@ -52,8 +52,11 @@ has been done**, and the installer is not signed.
   safe file name (no paths, no reserved device names), an existing file is
   never overwritten, a SHA-256 is checked when the file ends, a partial file
   is deleted on any failure, and the result is marked as downloaded from the
-  internet so Windows warns before it is run. Nothing can be run remotely by
-  the program.
+  internet so Windows warns before it is run (where the drive can hold the
+  mark; if it cannot, the file is still saved and the transfer list says it
+  could not be marked). The final name is claimed atomically, so a file
+  that appears at the same moment is never replaced. Nothing can be run
+  remotely by the program.
 - **Clipboard** is text only, only while both ends want it, never sends what
   was there when it was switched on, and skips content marked private.
 - **Servers** (rendezvous and relay) see addresses, IDs, names and byte

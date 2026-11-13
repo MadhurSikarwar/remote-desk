@@ -3,6 +3,11 @@ use std::sync::Arc;
 
 use super::*;
 
+thread_local! {
+    /// Makes the download mark fail for transfers finished on this thread.
+    pub(super) static MARK_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 type Queue = Arc<Mutex<VecDeque<Message>>>;
 
 /// Two ends of a session joined by queues, so a test decides when messages
@@ -666,4 +671,46 @@ fn a_directory_in_the_way_is_not_replaced_either() {
         fs::read_to_string(wanted.join("inside.txt")).unwrap(),
         "kept"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_download_mark_that_cannot_be_written_is_an_error_not_silence() {
+    let dir = tempfile::tempdir().unwrap();
+    // A file in a folder that does not exist: the stream cannot be written.
+    let missing = dir.path().join("no such folder").join("file.bin");
+    assert!(mark_as_downloaded(&missing).is_err());
+
+    // And where it can be written it is, and says so.
+    let fine = dir.path().join("file.bin");
+    fs::write(&fine, "x").unwrap();
+    mark_as_downloaded(&fine).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_file_is_still_saved_and_the_person_is_told_when_it_could_not_be_marked() {
+    let pair = Pair::new(true, true);
+    let content = data(5_000);
+    let id = pair.offer_and_accept("note.txt", content.len() as u64);
+    MARK_FAILS.with(|f| f.set(true));
+    pair.send_all(id, &content);
+    MARK_FAILS.with(|f| f.set(false));
+
+    let received = item(&pair.b);
+    assert_eq!(
+        received.state,
+        State::Finished,
+        "the file must still be saved"
+    );
+    let detail = received.detail.unwrap();
+    assert!(detail.starts_with("saved as"), "{detail}");
+    assert!(
+        detail.contains("could not be marked as downloaded"),
+        "the person was not told: {detail}"
+    );
+    let saved = pair.received_by_b().join("note.txt");
+    assert_eq!(fs::read(saved).unwrap(), content);
+    // The sender still hears that it arrived.
+    assert_eq!(item(&pair.a).detail.as_deref(), Some("delivered"));
 }

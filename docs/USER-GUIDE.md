@@ -102,7 +102,9 @@ device". Then:
   for each file, with its name and size. Files are saved in
   `Downloads\Prometheus`, never overwrite another file, are limited to
   2 GiB, and are marked as downloaded from the internet so Windows warns
-  before you run them. Progress and the result are listed; either person can
+  before you run them (when the drive can hold the mark, which FAT/exFAT
+  drives and some network or synced folders cannot; the transfer list says
+  when a file could not be marked). Progress and the result are listed; either person can
   cancel.
 
 The status line under the picture shows the frame rate, the delay from
