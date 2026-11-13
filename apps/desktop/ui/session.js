@@ -244,6 +244,7 @@
 
     const sent = `${status.frames} frames, ${(status.bytes / 1e6).toFixed(1)} MB sent` +
       (status.input_events > 0 ? `, ${status.input_events} input events carried out` : "") +
+      (describeLink(status.link, "the viewer") ? `. ${describeLink(status.link, "the viewer")}` : "") +
       (status.clipboard_sent + status.clipboard_received > 0
         ? `, clipboard: ${status.clipboard_sent} sent, ${status.clipboard_received} received` : "");
     shareStats.classList.toggle("error", Boolean(status.error));
@@ -332,7 +333,7 @@
   const viewControl = $("view-control");
   const viewControlLabel = $("view-control-label");
 
-  const PACKET = { CONFIG: 1, FRAME: 2, ENDED: 3, PERMISSIONS: 4, ACCEPTED: 5 };
+  const PACKET = { CONFIG: 1, FRAME: 2, ENDED: 3, PERMISSIONS: 4, ACCEPTED: 5, LOST: 6 };
   // H.264 Main profile, level 4.0. With no `description` the decoder expects
   // the Annex B stream the host sends.
   const CODEC = "avc1.4d0028";
@@ -408,13 +409,29 @@
         data: bytes.subarray(10),
       }));
     } else if (bytes[0] === PACKET.ACCEPTED) {
+      reconnecting = null; // the host said yes: this is the session again
       if (capabilityTimer === null) capabilityTimer = setInterval(showCapabilities, 700);
       viewStats.textContent = "Allowed. Waiting for the first picture…";
       statsTimer = setInterval(showViewStats, 1000);
     } else if (bytes[0] === PACKET.PERMISSIONS) {
       setHostAllowsControl((bytes[1] & 1) === 1);
     } else if (bytes[0] === PACKET.ENDED) {
-      endViewing(new TextDecoder().decode(bytes.subarray(1)));
+      const reason = new TextDecoder().decode(bytes.subarray(1));
+      endViewing(reason);
+      if (reconnecting && Reconnect.transientEnd(reason)) {
+        // Part-way through getting a connection back, and the host says "not
+        // now" (it may not have noticed the old connection die yet).
+        reconnecting.connected = false;
+        enterReconnectUi();
+        scheduleAttempt();
+      } else {
+        reconnecting = null;
+      }
+    } else if (bytes[0] === PACKET.LOST) {
+      // The connection broke without a goodbye: try to get it back.
+      const reason = new TextDecoder().decode(bytes.subarray(1)).replace(/^connection lost: /i, "");
+      endViewing(reason);
+      beginReconnect(reason);
     }
   }
 
@@ -523,9 +540,20 @@
   const viewClipboard = $("view-clipboard");
   let capabilityTimer = null;
 
+  // What the link is doing, from the same poll that shows the capabilities.
+  let linkNote = "";
+  const ms = (value) => (value < 10 ? value.toFixed(1) : value.toFixed(0));
+  // Round trip while the other end answers; a warning once it goes quiet.
+  function describeLink(link, who) {
+    if (!link) return "";
+    if (link.silent_ms > 6000) return `No answer from ${who} for ${Math.round(link.silent_ms / 1000)} s`;
+    return link.rtt_ms === null ? "" : `Round trip to ${who}: ${ms(link.rtt_ms)} ms`;
+  }
+
   async function showCapabilities() {
     const status = await invoke("view_capability_status").catch(() => null);
     const available = Boolean(status) && viewing;
+    linkNote = available ? describeLink(status.link, "the host") : "";
     viewClipboard.disabled = !(available && status.clipboard_available && status.clipboard_host_allows);
     if (viewClipboard.disabled && !available) viewClipboard.checked = false;
     $("view-clipboard-label").textContent = !available || !status.clipboard_available
@@ -560,12 +588,14 @@
     viewStats.classList.remove("error");
     viewStats.textContent =
       `${size.width}×${size.height} — ${(drawn / seconds).toFixed(1)} frames per second` +
-      (latency === null ? " (screen not changing)" : `, ${latency.toFixed(0)} ms from capture to display`);
+      (latency === null ? " (screen not changing)" : `, ${latency.toFixed(0)} ms from capture to display`) +
+      (linkNote === "" ? "" : `. ${linkNote}`);
   }
 
   function endViewing(reason) {
     if (!viewing) return;
     viewing = false;
+    linkNote = "";
     clearInterval(statsTimer);
     statsTimer = null;
     decoder?.close();
@@ -622,7 +652,130 @@
     findButton.disabled = false;
   });
 
+  // Connects, and shows who answered. Throws if the connection cannot be made.
+  async function connectNow(address) {
+    Object.keys(totals).forEach((key) => { totals[key] = 0; });
+    lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
+
+    const packets = new Channel();
+    packets.onmessage = onPacket;
+    viewing = true;
+    let host;
+    try {
+      host = await invoke("view_connect", { address, expectedKey, packets });
+    } catch (error) {
+      viewing = false;
+      throw error;
+    }
+    viewToggle.textContent = "Disconnect";
+    viewPort.disabled = true;
+    // Shown as text only: the name is whatever the other device says.
+    $("view-host-name").textContent = host.name;
+    $("view-host-fingerprint").textContent = host.fingerprint;
+    $("view-host-route").textContent = host.route;
+    $("view-host-code").textContent = host.auth_code;
+    $("view-host").hidden = false;
+    viewStats.classList.remove("error");
+    // The host may already have answered while this call returned.
+    if (viewing && statsTimer === null) {
+      viewStats.textContent =
+        "Waiting for the person at the other device to allow it. " +
+        "Their screen must show the same code.";
+    }
+  }
+
+  // ---- Viewer: getting a lost connection back -----------------------------
+  //
+  // Only a connection that broke without a goodbye is retried. Every attempt
+  // is a brand new session: the host asks its user again each time, and the
+  // device must still hold the key that was asked for. Reconnect.js decides
+  // what is retried and for how long.
+
+  let reconnecting = null;
+
+  function enterReconnectUi() {
+    viewToggle.textContent = "Stop reconnecting";
+    viewToggle.disabled = false;
+    viewPort.disabled = true;
+  }
+
+  function beginReconnect(reason) {
+    // Lost again part-way through getting it back: the clock keeps running.
+    const state = reconnecting ?? {
+      address: viewPort.value.trim(), lost: Date.now(), attempt: 0, timer: null, cancelled: false,
+    };
+    state.reason = reason;
+    state.connected = false;
+    reconnecting = state;
+    enterReconnectUi();
+    scheduleAttempt();
+  }
+
+  function showReconnect(text) {
+    viewStats.classList.add("error");
+    viewStats.textContent = text;
+  }
+
+  function scheduleAttempt() {
+    const state = reconnecting;
+    state.attempt += 1;
+    const elapsed = (Date.now() - state.lost) / 1000;
+    if (!Reconnect.mayTryAgain(elapsed, state.attempt)) {
+      return stopReconnecting(`Connection lost: ${state.reason}. Could not get it back; gave up.`);
+    }
+    let wait = Reconnect.delaySeconds(state.attempt);
+    const tick = () => {
+      if (state.cancelled) return;
+      if (wait > 0) {
+        showReconnect(`Connection lost: ${state.reason}. Trying again in ${wait} s (attempt ${state.attempt}).`);
+        wait -= 1;
+        state.timer = setTimeout(tick, 1000);
+      } else {
+        attempt();
+      }
+    };
+    tick();
+  }
+
+  async function attempt() {
+    const state = reconnecting;
+    showReconnect(`Connection lost: ${state.reason}. Reconnecting (attempt ${state.attempt})…`);
+    try {
+      await connectNow(state.address);
+    } catch (error) {
+      if (state.cancelled) return;
+      if (!Reconnect.retryable(error)) {
+        return stopReconnecting(`Connection lost: ${state.reason}. Not trying again: ${message(error)}`);
+      }
+      return scheduleAttempt();
+    }
+    if (state.cancelled) {
+      // Cancelled while the attempt was in flight.
+      await invoke("view_disconnect").catch(() => {});
+      return;
+    }
+    // Connected, but the host has not said yes yet. `reconnecting` stays
+    // until it does (ACCEPTED) or ends the attempt.
+    state.connected = true;
+  }
+
+  function stopReconnecting(text) {
+    if (reconnecting) {
+      reconnecting.cancelled = true;
+      clearTimeout(reconnecting.timer);
+      reconnecting = null;
+    }
+    viewToggle.textContent = "Connect";
+    viewPort.disabled = false;
+    showReconnect(text);
+  }
+
   viewToggle.addEventListener("click", async () => {
+    if (reconnecting && !reconnecting.connected) {
+      stopReconnecting("Reconnecting stopped.");
+      viewStats.classList.remove("error");
+      return;
+    }
     viewToggle.disabled = true;
     try {
       if (viewing) {
@@ -631,34 +784,7 @@
         const address = viewPort.value.trim();
         if (!address) throw new Error("Enter the device ID or address shown by the sharing device, or find it on the network");
         if (!("VideoDecoder" in window)) throw new Error("This system's web view cannot decode video");
-        Object.keys(totals).forEach((key) => { totals[key] = 0; });
-        lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
-
-        const packets = new Channel();
-        packets.onmessage = onPacket;
-        viewing = true;
-        let host;
-        try {
-          host = await invoke("view_connect", { address, expectedKey, packets });
-        } catch (error) {
-          viewing = false;
-          throw error;
-        }
-        viewToggle.textContent = "Disconnect";
-        viewPort.disabled = true;
-        // Shown as text only: the name is whatever the other device says.
-        $("view-host-name").textContent = host.name;
-        $("view-host-fingerprint").textContent = host.fingerprint;
-        $("view-host-route").textContent = host.route;
-        $("view-host-code").textContent = host.auth_code;
-        $("view-host").hidden = false;
-        viewStats.classList.remove("error");
-        // The host may already have answered while this call returned.
-        if (viewing && statsTimer === null) {
-          viewStats.textContent =
-            "Waiting for the person at the other device to allow it. " +
-            "Their screen must show the same code.";
-        }
+        await connectNow(address);
       }
     } catch (error) {
       viewStats.textContent = message(error);

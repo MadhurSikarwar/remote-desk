@@ -32,3 +32,5 @@ jobs:
         run: ci/run.sh cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: ci/run.sh cargo test --workspace --locked
+      - name: Window script tests
+        run: node --test apps/desktop/ui/reconnect.test.js
