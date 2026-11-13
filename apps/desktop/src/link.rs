@@ -24,8 +24,9 @@ use crate::secure::{lock, SecureWriter};
 
 /// How often the monitor looks at the clock.
 const TICK: Duration = Duration::from_millis(50);
-/// Pings that have not been answered yet and are still remembered.
-const OUTSTANDING: usize = 8;
+/// Pings that have not been answered yet and are still remembered. Enough
+/// to see a delay of a minute at four pings a second.
+const OUTSTANDING: usize = 256;
 /// Weight of the newest measurement in the smoothed round-trip time.
 const SMOOTHING: f64 = 0.2;
 
@@ -40,7 +41,11 @@ pub struct LinkTiming {
 impl Default for LinkTiming {
     fn default() -> Self {
         Self {
-            ping_every: Duration::from_secs(5),
+            // Four a second: the answers time how long data waits in
+            // buffers on the way, which the sender uses to slow down, and
+            // the sooner it knows the less piles up. A ping is about 31
+            // bytes, so this is about 1 kbit/s each way.
+            ping_every: Duration::from_millis(250),
             timeout: Duration::from_secs(15),
         }
     }
@@ -143,6 +148,23 @@ impl Link {
             nonce
         };
         self.writer.send(&Message::Ping { nonce })
+    }
+
+    /// How long data sent now would wait in buffers on the way, beyond the
+    /// time the path itself takes, in milliseconds. Pings queue behind the
+    /// video in the same buffers, so their round trip shows it. A ping that
+    /// has not come back yet counts for as long as it has been waiting, so a
+    /// delay is noticed while it grows and not only after it has passed.
+    pub fn queue_delay_ms(&self) -> f64 {
+        let m = lock(&self.measurements);
+        let Some(best) = m.best else {
+            return 0.0;
+        };
+        let waiting = m
+            .outstanding
+            .front()
+            .map_or(0.0, |(_, sent)| sent.elapsed().as_secs_f64() * 1000.0);
+        (m.latest.unwrap_or(0.0).max(waiting) - best).max(0.0)
     }
 
     /// The link was declared dead; why, for the "connection lost" message.
