@@ -66,6 +66,7 @@ pub fn start_share(
         approval_timeout: Duration::from_secs(u64::from(config.security.approval_timeout_secs)),
         link: LinkTiming::default(),
         adaptive: config.video.adaptive_quality,
+        setup_deadline: crate::secure::SETUP_DEADLINE,
     })?;
     // `display` cannot be used as a field name: the macro shadows it.
     let index = display;

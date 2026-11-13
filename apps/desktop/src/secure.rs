@@ -1,18 +1,24 @@
 //! This device's keys, and protocol messages over an encrypted connection.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rc_crypto::channel::{Handshake, Opener, Sealer, Side};
 use rc_crypto::{fingerprint, Identity, PublicKey, TrustStore};
 use rc_protocol::{write_message, Message, MessageDecoder, Role, PROTOCOL_VERSION};
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most a new connection may take, from the first byte to the end of the
+/// greeting, however slowly its peer sends. A socket timeout alone is not
+/// this: it starts again with every byte that arrives, so a peer sending one
+/// byte at a time could hold a connection (and one of the few places for
+/// them) for hours.
+pub const SETUP_DEADLINE: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often a reader wakes up to check whether it should stop.
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -108,6 +114,46 @@ pub struct SecureReader {
     opener: Opener,
     decoder: MessageDecoder,
     chunk: Vec<u8>,
+    /// While the greeting is still to come: when setup must be over.
+    deadline: Option<Instant>,
+}
+
+/// A connection whose every read and write must finish by a fixed time.
+struct Deadline<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl Deadline<'_> {
+    /// Time left, or the error that ends the attempt.
+    fn left(&self) -> io::Result<Duration> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the other device took too long to set up the connection",
+            ));
+        }
+        Ok(left)
+    }
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.left()?))?;
+        (&*self.stream).read(buf)
+    }
+}
+
+impl Write for Deadline<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.left()?))?;
+        (&*self.stream).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.stream).flush()
+    }
 }
 
 impl SecureReader {
@@ -134,17 +180,27 @@ impl SecureReader {
         }
     }
 
-    /// Waits for one message; a timeout is an error. For the opening
-    /// exchange, where the peer must answer promptly.
+    /// Waits for one message; running out of time is an error. For the
+    /// opening exchange, where the peer must answer promptly: the message
+    /// must be complete within [`HANDSHAKE_TIMEOUT`] of this call and within
+    /// the setup deadline, however slowly it is sent.
     pub fn read_message(&mut self) -> Result<Message, String> {
-        self.stream
-            .set_read_timeout(Some(HANDSHAKE_TIMEOUT))
-            .map_err(|e| e.to_string())?;
+        let mut until = Instant::now() + HANDSHAKE_TIMEOUT;
+        if let Some(deadline) = self.deadline {
+            until = until.min(deadline);
+        }
         loop {
             if let Some(message) = self.decoder.next_message().map_err(|e| e.to_string())? {
                 return Ok(message);
             }
-            if !self.fill()? {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("the other device did not answer in time".to_owned());
+            }
+            self.stream
+                .set_read_timeout(Some(left))
+                .map_err(|e| e.to_string())?;
+            if !self.fill()? && Instant::now() >= until {
                 return Err("the other device did not answer in time".to_owned());
             }
         }
@@ -179,18 +235,32 @@ impl SecureReader {
 }
 
 /// Performs the handshake on a fresh connection. From here on nothing is
-/// sent in the clear.
+/// sent in the clear. Together with the greeting that [`exchange_hello`]
+/// carries out next, it must be over within [`SETUP_DEADLINE`].
 pub fn establish(
     stream: &TcpStream,
     identity: &Identity,
     side: Side,
 ) -> Result<(SecureWriter, SecureReader, Peer), String> {
+    establish_within(stream, identity, side, SETUP_DEADLINE)
+}
+
+/// As [`establish`], with the whole of the setup given `limit`.
+pub fn establish_within(
+    stream: &TcpStream,
+    identity: &Identity,
+    side: Side,
+    limit: Duration,
+) -> Result<(SecureWriter, SecureReader, Peer), String> {
+    let until = Instant::now() + limit;
+    stream.set_nodelay(true).map_err(|e| e.to_string())?;
+    let mut timed = Deadline { stream, until };
+    let session = Handshake::run(identity, side, &mut timed).map_err(|e| e.to_string())?;
+    // Writes after setup (the greeting, then the session) use the ordinary
+    // write timeout again.
     stream
-        .set_nodelay(true)
-        .and_then(|()| stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)))
-        .and_then(|()| stream.set_write_timeout(Some(WRITE_TIMEOUT)))
+        .set_write_timeout(Some(WRITE_TIMEOUT))
         .map_err(|e| e.to_string())?;
-    let session = Handshake::run(identity, side, &mut &*stream).map_err(|e| e.to_string())?;
     let clone = || stream.try_clone().map_err(|e| e.to_string());
 
     let peer = Peer {
@@ -207,6 +277,7 @@ pub fn establish(
         opener: session.opener,
         decoder: MessageDecoder::default(),
         chunk: vec![0u8; 64 * 1024],
+        deadline: Some(until),
     };
     Ok((writer, reader, peer))
 }
@@ -214,6 +285,18 @@ pub fn establish(
 /// Exchanges greetings and returns the peer's name. Fails, telling the peer
 /// why, unless it speaks the same protocol version in the opposite role.
 pub fn exchange_hello(
+    writer: &SecureWriter,
+    reader: &mut SecureReader,
+    my_role: Role,
+    my_name: &str,
+) -> Result<String, String> {
+    let result = greet(writer, reader, my_role, my_name);
+    // Setup is over, one way or the other: the session reads as it likes.
+    reader.deadline = None;
+    result
+}
+
+fn greet(
     writer: &SecureWriter,
     reader: &mut SecureReader,
     my_role: Role,
@@ -295,8 +378,84 @@ pub mod test_support {
 mod tests {
     use std::sync::Arc;
 
+    use std::time::Instant;
+
     use super::test_support::{secure_pair, socket_pair};
     use super::*;
+
+    /// Sends `first`, then one byte every `gap` until the other end goes
+    /// away: a peer that is slow on purpose.
+    fn trickle(mut stream: TcpStream, first: Vec<u8>, gap: Duration) {
+        std::thread::spawn(move || {
+            if stream.write_all(&first).is_err() {
+                return;
+            }
+            while stream.write_all(&[0u8]).is_ok() {
+                std::thread::sleep(gap);
+            }
+        });
+    }
+
+    #[test]
+    fn a_peer_that_trickles_the_handshake_cannot_stretch_it() {
+        let (client, server) = socket_pair();
+        // A record header claiming 65535 bytes, then one byte at a time: the
+        // socket timeout alone would start again with every byte.
+        trickle(server, vec![0xFF, 0xFF], Duration::from_millis(100));
+        let started = Instant::now();
+        let result = establish_within(
+            &client,
+            &Identity::generate().unwrap(),
+            Side::Initiator,
+            Duration::from_secs(1),
+        );
+        let took = started.elapsed();
+        assert!(result.is_err(), "the handshake succeeded");
+        assert!(
+            took >= Duration::from_millis(900) && took < Duration::from_millis(2500),
+            "the deadline was 1 s but the handshake took {took:?}"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_trickles_the_greeting_cannot_stretch_it() {
+        let (client, server) = socket_pair();
+        let responder = std::thread::spawn(move || {
+            let (_writer, _reader, _) = establish_within(
+                &server,
+                &Identity::generate().unwrap(),
+                Side::Responder,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            // The handshake is done; the greeting never completes: a record
+            // header claiming a full-size record, then one byte at a time.
+            trickle(
+                server.try_clone().unwrap(),
+                vec![0xFF, 0xFF],
+                Duration::from_millis(100),
+            );
+            std::thread::sleep(Duration::from_secs(4));
+            drop(server);
+        });
+        let started = Instant::now();
+        let (writer, mut reader, _) = establish_within(
+            &client,
+            &Identity::generate().unwrap(),
+            Side::Initiator,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let result = exchange_hello(&writer, &mut reader, Role::Viewer, "Me");
+        let took = started.elapsed();
+        assert!(result.is_err(), "the greeting succeeded");
+        assert!(
+            took < Duration::from_millis(2500),
+            "setup was given 1 s but the greeting ran to {took:?}"
+        );
+        drop((writer, reader, client));
+        responder.join().unwrap();
+    }
 
     #[test]
     fn names_are_made_printable_and_bounded() {

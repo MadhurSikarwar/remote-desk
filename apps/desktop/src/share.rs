@@ -43,7 +43,7 @@ use crate::congestion::{CongestionStatus, Controller, Pace};
 use crate::link::{Link, LinkStats, LinkTiming, Monitor};
 use crate::rendezvous::{keep_registered, Registration, ServerLink};
 pub use crate::secure::lock;
-use crate::secure::{establish, exchange_hello, Peer, SecureReader, SecureWriter, Security};
+use crate::secure::{establish_within, exchange_hello, Peer, SecureReader, SecureWriter, Security};
 use crate::transfer::TransferStatus;
 
 /// Wait for a screen change this long before checking the stop flag again.
@@ -100,6 +100,9 @@ pub struct ShareSettings {
     /// Slow the video down when the connection cannot keep up. Off means
     /// always `bitrate_kbps`, whatever the connection does.
     pub adaptive: bool,
+    /// How long a new connection may take to set up (handshake and
+    /// greeting) in total, however slowly its peer sends.
+    pub setup_deadline: Duration,
 }
 
 /// A viewer waiting for the person at this computer to decide.
@@ -453,7 +456,12 @@ fn welcome(
     shared: &Shared,
     security: &Security,
 ) -> Result<Welcomed, String> {
-    let (writer, mut reader, peer) = establish(stream, security.identity(), Side::Responder)?;
+    let (writer, mut reader, peer) = establish_within(
+        stream,
+        security.identity(),
+        Side::Responder,
+        settings.setup_deadline,
+    )?;
     let name = exchange_hello(&writer, &mut reader, Role::Host, &settings.device_name)?;
 
     let turn_away = |reason: &str| {
@@ -1229,7 +1237,7 @@ impl ShareController {
 #[cfg(test)]
 pub mod test_support {
     use super::*;
-    use crate::secure::SecureReader;
+    use crate::secure::{establish, SecureReader};
 
     pub fn settings() -> ShareSettings {
         ShareSettings {
@@ -1250,6 +1258,7 @@ pub mod test_support {
             approval_timeout: Duration::from_secs(10),
             link: LinkTiming::default(),
             adaptive: true,
+            setup_deadline: crate::secure::SETUP_DEADLINE,
         }
     }
 

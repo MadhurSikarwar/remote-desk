@@ -1,7 +1,7 @@
 use super::test_support::{knock, knock_at, pending, settings, wait_until};
 use super::*;
 use crate::secure::test_support::{desktop, security};
-use crate::secure::SecureReader;
+use crate::secure::{establish, SecureReader};
 
 const MS: Duration = Duration::from_millis(1);
 
@@ -690,4 +690,61 @@ fn a_sharing_device_is_discoverable_only_while_it_allows_it() {
     // Gone as soon as sharing stops.
     host.stop();
     assert!(find().is_none());
+}
+
+/// Eight slow peers used to be enough to hold every place for connections
+/// for as long as they cared to keep trickling bytes.
+#[test]
+fn slow_peers_cannot_hold_all_the_connection_places() {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let (host_keys, _dir) = security();
+    let (viewer_keys, _dir2) = security();
+    let host = ShareController::new(Some(host_keys));
+    let port = host
+        .start(ShareSettings {
+            setup_deadline: Duration::from_millis(800),
+            ..settings()
+        })
+        .unwrap()
+        .port
+        .unwrap();
+
+    // Eight peers that begin a handshake and then send one byte at a time.
+    let stop = Arc::new(AtomicBool::new(false));
+    let slow: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+                if stream.write_all(&[0xFF, 0xFF]).is_err() {
+                    return;
+                }
+                while !stop.load(Ordering::Relaxed) && stream.write_all(&[0u8]).is_ok() {
+                    thread::sleep(Duration::from_millis(100));
+                }
+            })
+        })
+        .collect();
+    thread::sleep(Duration::from_millis(300));
+
+    // All the places are taken: a proper viewer is turned away.
+    let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    assert!(
+        establish(&stream, viewer_keys.identity(), Side::Initiator).is_err(),
+        "a ninth connection was served while eight slow ones were setting up"
+    );
+
+    // The host gives up on the slow ones when the deadline passes, and a
+    // proper viewer gets through and is put in front of the host's user.
+    thread::sleep(Duration::from_millis(1500));
+    let _viewer = knock(port, &viewer_keys, "Late but proper");
+    assert_eq!(pending(&host).name, "Late but proper");
+
+    stop.store(true, Ordering::Relaxed);
+    for peer in slow {
+        peer.join().unwrap();
+    }
+    host.stop();
 }
