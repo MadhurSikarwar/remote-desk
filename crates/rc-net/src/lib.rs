@@ -172,6 +172,11 @@ pub fn decode_reply(packet: &[u8]) -> Option<(u64, Announcement)> {
 fn shared_socket(port: u16) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    // macOS (like the other BSDs) lets sockets share a port only with this
+    // as well; Windows and Linux are content with the line above. Not set on
+    // Linux, where it would hand each datagram to just one of the sockets.
+    #[cfg(target_os = "macos")]
+    socket.set_reuse_port(true)?;
     socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
     Ok(socket.into())
 }
