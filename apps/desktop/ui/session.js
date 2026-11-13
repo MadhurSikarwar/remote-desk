@@ -123,6 +123,9 @@
       remote.textContent =
         `Other computers on your network can reach this one at ${where}. ` +
         (status.discoverable ? "It also answers \"who is sharing?\" on the local network. " : "") +
+        (status.rendezvous
+          ? `${status.rendezvous}. Anyone with this device's ID, ${$("fingerprint").textContent}, can ask to connect. `
+          : "") +
         "Each viewer still needs your permission.";
     }
 
@@ -434,7 +437,7 @@
         await invoke("view_disconnect");
       } else {
         const address = viewPort.value.trim();
-        if (!address) throw new Error("Enter the address shown by the sharing device, or find it on the network");
+        if (!address) throw new Error("Enter the device ID or address shown by the sharing device, or find it on the network");
         if (!("VideoDecoder" in window)) throw new Error("This system's web view cannot decode video");
         Object.keys(totals).forEach((key) => { totals[key] = 0; });
         lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
@@ -454,6 +457,7 @@
         // Shown as text only: the name is whatever the other device says.
         $("view-host-name").textContent = host.name;
         $("view-host-fingerprint").textContent = host.fingerprint;
+        $("view-host-route").textContent = host.route;
         $("view-host-code").textContent = host.auth_code;
         $("view-host").hidden = false;
         viewStats.classList.remove("error");

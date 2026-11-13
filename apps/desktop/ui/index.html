@@ -37,7 +37,8 @@
           Sharing starts and stops here and nowhere else, and every viewer
           needs your permission each time. By default only this computer can
           connect; the setting "Let other computers connect" opens it to the
-          network.
+          network, and with a server set in the settings other networks can
+          reach this device by its ID.
         </p>
         <div class="row">
           <label>Display
@@ -80,8 +81,8 @@
       <section>
         <h2>View a screen</h2>
         <div class="row">
-          <label>Address shown by the sharing device
-            <input id="view-port" type="text" placeholder="192.168.1.20:51000" spellcheck="false" autocomplete="off" />
+          <label>Device ID or address of the sharing device
+            <input id="view-port" type="text" placeholder="0754-E5CE-BDDB-DF24 or 192.168.1.20:51000" spellcheck="false" autocomplete="off" />
           </label>
           <button id="view-toggle" type="button">Connect</button>
         </div>
@@ -99,6 +100,8 @@
           <dd id="view-host-name"></dd>
           <dt>Device key</dt>
           <dd id="view-host-fingerprint"></dd>
+          <dt>Reached</dt>
+          <dd id="view-host-route"></dd>
           <dt>Code</dt>
           <dd id="view-host-code" class="code"></dd>
         </dl>
