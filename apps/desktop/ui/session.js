@@ -706,22 +706,33 @@
     findButton.disabled = false;
   });
 
-  // Connects, and shows who answered. Throws if the connection cannot be made.
+  // Names the connection attempt that is current. What an attempt reports
+  // (its packets, and the end of the call that started it) counts only while
+  // it is still the current one and the session has not already ended: the
+  // program can say a session is over (a refusal, a disconnect) before the
+  // call that started it has returned.
+  let connectionToken = 0;
+
+  // Connects, and shows who answered. Throws if the connection cannot be
+  // made. Returns false, showing nothing, if the attempt was ended or
+  // replaced while the call was out.
   async function connectNow(address) {
     forgetHeldInput();
     Object.keys(totals).forEach((key) => { totals[key] = 0; });
     lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
 
+    const token = ++connectionToken;
     const packets = new Channel();
-    packets.onmessage = onPacket;
+    packets.onmessage = (payload) => { if (token === connectionToken) onPacket(payload); };
     viewing = true;
     let host;
     try {
       host = await invoke("view_connect", { address, expectedKey: expectedKey ?? learnedKey, packets });
     } catch (error) {
-      viewing = false;
+      if (token === connectionToken) viewing = false;
       throw error;
     }
+    if (token !== connectionToken || !viewing) return false;
     // From now on this device, and no other, is the one at this address.
     if (expectedKey === null && learnedKey === null) learnedKey = host.public_key ?? null;
     viewToggle.textContent = "Disconnect";
@@ -739,6 +750,7 @@
         "Waiting for the person at the other device to allow it. " +
         "Their screen must show the same code.";
     }
+    return true;
   }
 
   // ---- Viewer: getting a lost connection back -----------------------------
@@ -797,8 +809,9 @@
   async function attempt() {
     const state = reconnecting;
     showReconnect(`Connection lost: ${state.reason}. Reconnecting (attempt ${state.attempt})…`);
+    let connected = false;
     try {
-      await connectNow(state.address);
+      connected = await connectNow(state.address);
     } catch (error) {
       if (state.cancelled) return;
       if (!Reconnect.retryable(error)) {
@@ -812,11 +825,17 @@
       return;
     }
     // Connected, but the host has not said yes yet. `reconnecting` stays
-    // until it does (ACCEPTED) or ends the attempt.
-    state.connected = true;
+    // until it does (ACCEPTED) or ends the attempt. If the attempt was ended
+    // while the call was out (a refusal that arrived first), that has been
+    // dealt with already and there is nothing to mark.
+    if (connected) state.connected = true;
   }
 
   function stopReconnecting(text) {
+    // An attempt that is still out is no longer wanted: what it reports is
+    // ignored, and `attempt` closes the connection it may yet make.
+    connectionToken += 1;
+    viewing = false;
     if (reconnecting) {
       reconnecting.cancelled = true;
       clearTimeout(reconnecting.timer);
