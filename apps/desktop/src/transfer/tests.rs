@@ -539,11 +539,14 @@ fn no_more_than_two_files_are_sent_at_once_and_sizes_are_limited() {
 
 #[test]
 fn sending_is_held_to_the_rate_limit() {
+    // The clock starts before the transfer does: the pacing counts from when
+    // the file was accepted, so measuring from a later moment (after making
+    // the test data, which is slow on a slow machine) could fall short.
+    let started = Instant::now();
     let pair = Pair::new(true, true);
     let size = 2 * 1024 * 1024;
     let id = pair.offer_and_accept("rate.bin", size as u64);
     let content = data(size);
-    let started = Instant::now();
     pair.a.chunk(id, &content[..size / 2]).unwrap();
     pair.a.chunk(id, &content[size / 2..]).unwrap();
     // 2 MiB at 8 MiB/s is a quarter of a second.

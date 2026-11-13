@@ -19,7 +19,9 @@ on:
   workflow_call:
 
 concurrency:
-  group: installer-${{ github.ref }}
+  # The workflow name is the caller's when this runs as a part of Release, so
+  # that run and the ordinary one on a push do not cancel each other.
+  group: installer-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
