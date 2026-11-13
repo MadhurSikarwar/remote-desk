@@ -2,7 +2,7 @@
 
 # Prometheus
 
-A remote-desktop application for Windows, inspired by RustDesk, built around
+A remote-desktop application, inspired by RustDesk, built around
 one rule: **the person at the shared computer decides, every time.** Rust,
 Tauri 2, H.264 video, an end-to-end encrypted channel (Noise), direct or
 relayed connections.
@@ -24,6 +24,20 @@ for what they measured. Settings and keys now live in `%APPDATA%\Prometheus`
 still say "RemoteControl" on purpose: changing them would change what
 identities and codes compute. (Not to be confused with the Prometheus
 monitoring system, which is unrelated.)*
+
+## Which systems
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Share this computer's screen, and be controlled | **yes** | not yet | not yet |
+| View and control a shared screen | yes | built, **untried** | built, **untried** |
+| Package | installer | `.dmg` (Apple Silicon) | `.deb`, `.AppImage` |
+
+The macOS and Linux builds compile, pass lint and tests on CI and produce
+packages, but nobody has run them yet, and they cannot share their own screen
+(that needs a different capture, encoder and input method on each system).
+Details, limits and the plan: `docs/PLATFORMS.md`. The optional relay server
+runs on Linux.
 
 ## What it does
 
@@ -47,7 +61,9 @@ both**: one is the *host* (its screen is shared), one is the *viewer*.
 
 ### Before you start
 
-- Both computers: **Windows 10 or 11, 64-bit**. The window needs Microsoft's
+- Both computers: **Windows 10 or 11, 64-bit**. (Only Windows can *share*
+  its screen so far; a Mac or Linux computer can be the *viewer*, but that is
+  untried: see `docs/PLATFORMS.md`.) The window needs Microsoft's
   *WebView2 Runtime*, which Windows 11 and an up-to-date Windows 10 already
   have (the installer fetches it if it is missing; the portable file below
   does not).
@@ -249,6 +265,7 @@ The compiler is pinned (`rust-toolchain.toml`). The installer:
 | | |
 |---|---|
 | `docs/USER-GUIDE.md` | installing and using it |
+| `docs/PLATFORMS.md` | what works on Windows, macOS and Linux, and the plan |
 | `docs/DEPLOYMENT.md` | running the server |
 | `docs/SECURITY.md` | what is protected, what is not |
 | `docs/RELEASING.md` | building, CI, what is unsigned and unreleased |
