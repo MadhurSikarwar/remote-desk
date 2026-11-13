@@ -308,3 +308,59 @@ button:disabled {
   opacity: 0.5;
   cursor: default;
 }
+
+.transfers {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.transfers h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.transfers ul {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.transfers li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.transfers li .name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.transfers li .detail {
+  flex-basis: 100%;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.transfers li.waiting {
+  border-left: 3px solid var(--accent);
+  padding-left: 8px;
+}
+
+.transfers progress {
+  width: 160px;
+}
+
+.transfers button {
+  padding: 3px 10px;
+}
+
+.file-pick {
+  display: block;
+  color: var(--text);
+}

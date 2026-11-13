@@ -50,7 +50,24 @@
           <input id="share-input" type="checkbox" disabled />
           Let the viewer control this computer's mouse and keyboard
         </label>
+        <label class="check">
+          <input id="share-clipboard" type="checkbox" disabled />
+          Let the viewer sync clipboard text with this computer
+        </label>
+        <label class="check">
+          <input id="share-files" type="checkbox" disabled />
+          Let files be sent between the computers (each file still needs your acceptance)
+        </label>
         <p id="share-stats" role="status"></p>
+        <div id="transfers-host" class="transfers" hidden>
+          <h3>Files</h3>
+          <ul id="transfer-list-host"></ul>
+          <label class="file-pick">Send a file to the viewer
+            <input id="host-file" type="file" disabled />
+          </label>
+          <p id="transfer-message-host" class="muted" role="status"></p>
+          <p id="transfer-folder-host" class="muted"></p>
+        </div>
         <p id="share-remote" class="banner warn" hidden></p>
         <div id="approval" class="approval" role="alertdialog" aria-labelledby="approval-title" hidden>
           <h3 id="approval-title"></h3>
@@ -95,6 +112,19 @@
           <input id="view-control" type="checkbox" disabled />
           <span id="view-control-label">Control the shared screen</span>
         </label>
+        <label class="check">
+          <input id="view-clipboard" type="checkbox" disabled />
+          <span id="view-clipboard-label">Sync clipboard text with the host</span>
+        </label>
+        <div id="transfers-viewer" class="transfers" hidden>
+          <h3>Files</h3>
+          <ul id="transfer-list-viewer"></ul>
+          <label class="file-pick">Send a file to the host
+            <input id="view-file" type="file" disabled />
+          </label>
+          <p id="transfer-message-viewer" class="muted" role="status"></p>
+          <p id="transfer-folder-viewer" class="muted"></p>
+        </div>
         <dl id="view-host" hidden>
           <dt>Connected to</dt>
           <dd id="view-host-name"></dd>

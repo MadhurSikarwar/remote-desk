@@ -13,6 +13,136 @@
   const shareToggle = $("share-toggle");
   const shareStats = $("share-stats");
   const shareInput = $("share-input");
+  const shareClipboard = $("share-clipboard");
+  const shareFiles = $("share-files");
+
+  // ---- Files: shown and driven the same way at both ends -------------------
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const humanSize = (bytes) => {
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB"];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+    return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+  };
+
+  const lastTransferSignature = { host: "", viewer: "" };
+
+  /** Shows a transfer list. Everything comes from the other device and is
+   *  inserted as text, never as markup. */
+  function renderTransfers(role, status) {
+    const list = $(`transfer-list-${role}`);
+    const items = status ? status.items : [];
+    const signature = JSON.stringify(items.map(({ seconds_left, ...rest }) => rest));
+    $(`transfer-folder-${role}`).textContent = status
+      ? `Received files are saved in ${status.folder}` : "";
+    for (const span of list.querySelectorAll("[data-countdown]")) {
+      const item = items.find((i) => String(i.id) === span.dataset.countdown && i.direction === "incoming");
+      if (item?.seconds_left != null) span.textContent = ` (refused automatically in ${item.seconds_left} s)`;
+    }
+    if (signature === lastTransferSignature[role]) return;
+    lastTransferSignature[role] = signature;
+
+    const answer = (id, accept) => invoke("transfer_answer", { role, id, accept }).catch((e) => {
+      $(`transfer-message-${role}`).textContent = message(e);
+    });
+    const cancel = (item) => invoke("transfer_cancel", { role, direction: item.direction, id: item.id });
+    const button = (label, handler, secondary) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      if (secondary) b.className = "secondary";
+      b.addEventListener("click", handler);
+      return b;
+    };
+
+    list.replaceChildren(...items.slice().reverse().map((item) => {
+      const li = document.createElement("li");
+      const incoming = item.direction === "incoming";
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = `${incoming ? "↓" : "↑"} ${item.name} (${humanSize(item.size)})`;
+      li.append(name);
+      const detail = document.createElement("span");
+      detail.className = "detail";
+      switch (item.state) {
+        case "waiting_for_you": {
+          li.className = "waiting";
+          const countdown = document.createElement("span");
+          countdown.dataset.countdown = String(item.id);
+          countdown.className = "muted";
+          countdown.textContent = ` (refused automatically in ${item.seconds_left ?? 0} s)`;
+          li.append(
+            document.createTextNode("is being sent to you"),
+            button("Accept", () => answer(item.id, true)),
+            button("Refuse", () => answer(item.id, false), true),
+            countdown,
+          );
+          break;
+        }
+        case "waiting_for_peer":
+          li.append(document.createTextNode("waiting for the other side to accept…"), button("Cancel", () => cancel(item), true));
+          break;
+        case "transferring": {
+          const bar = document.createElement("progress");
+          bar.max = Math.max(item.size, 1);
+          bar.value = item.done;
+          li.append(bar, button("Cancel", () => cancel(item), true));
+          if (item.detail) { detail.textContent = item.detail; li.append(detail); }
+          break;
+        }
+        default:
+          detail.textContent = `${item.state.replace("_", " ")}${item.detail ? " — " + item.detail : ""}`;
+          li.append(detail);
+      }
+      return li;
+    }));
+  }
+
+  /** Offers a file the person picked, waits for the other side to accept,
+   *  then sends it in pieces. Only this file's bytes are ever read. */
+  async function sendFile(role, file) {
+    const note = $(`transfer-message-${role}`);
+    note.textContent = `Offering ${file.name}…`;
+    let id;
+    try {
+      id = await invoke("transfer_offer", { role, name: file.name, size: file.size });
+      const give_up = Date.now() + 75_000;
+      for (;;) {
+        const status = await invoke("transfer_status", { role });
+        const item = status.items.find((i) => i.direction === "outgoing" && i.id === id);
+        if (!item) throw new Error("The transfer disappeared");
+        if (item.state === "transferring") break;
+        if (["refused", "cancelled", "failed"].includes(item.state)) {
+          throw new Error(item.detail ?? "The other side did not accept");
+        }
+        if (Date.now() > give_up) throw new Error("Nobody accepted the file in time");
+        await sleep(300);
+      }
+      const piece = 256 * 1024;
+      for (let offset = 0; offset < file.size; offset += piece) {
+        const bytes = new Uint8Array(await file.slice(offset, offset + piece).arrayBuffer());
+        await invoke("transfer_chunk", bytes, { headers: { "x-role": role, "x-id": String(id) } });
+      }
+      await invoke("transfer_finish", { role, id });
+      note.textContent = `Sent ${file.name}.`;
+    } catch (error) {
+      note.textContent = `${file.name}: ${message(error)}`;
+      if (id !== undefined) invoke("transfer_cancel", { role, direction: "outgoing", id }).catch(() => {});
+    }
+  }
+  window.__sendFile = sendFile;
+
+  for (const role of ["host", "viewer"]) {
+    const input = $(role === "host" ? "host-file" : "view-file");
+    input.addEventListener("change", async () => {
+      const files = Array.from(input.files);
+      input.value = "";
+      for (const file of files) await sendFile(role, file);
+    });
+  }
   let shareTimer = null;
 
   // ---- Host: a viewer asking to be let in ---------------------------------
@@ -83,8 +213,14 @@
   function showShare(status) {
     const live = status.active && status.viewer_connected;
     showApproval(status.pending);
+    // Everything the viewer may currently do is named in the badge.
+    const allowed = [
+      status.input_allowed && "viewer has control",
+      status.clipboard_allowed && "clipboard sync",
+      status.files_allowed && "file transfer",
+    ].filter(Boolean);
     pill.textContent = live
-      ? status.input_allowed ? "Sharing screen — viewer has control" : "Sharing screen"
+      ? `Sharing screen${allowed.length ? " — " + allowed.join(", ") : ""}`
       : status.pending
         ? "A viewer is waiting for your answer"
         : status.active
@@ -98,9 +234,18 @@
     shareDisplay.disabled = status.active;
     shareInput.disabled = !status.active;
     shareInput.checked = status.input_allowed;
+    shareClipboard.disabled = !status.active;
+    shareClipboard.checked = status.clipboard_allowed;
+    shareFiles.disabled = !status.active;
+    shareFiles.checked = status.files_allowed;
+    $("transfers-host").hidden = !(status.active && status.viewer_connected && status.transfers);
+    $("host-file").disabled = !status.files_allowed;
+    renderTransfers("host", status.transfers);
 
     const sent = `${status.frames} frames, ${(status.bytes / 1e6).toFixed(1)} MB sent` +
-      (status.input_events > 0 ? `, ${status.input_events} input events carried out` : "");
+      (status.input_events > 0 ? `, ${status.input_events} input events carried out` : "") +
+      (status.clipboard_sent + status.clipboard_received > 0
+        ? `, clipboard: ${status.clipboard_sent} sent, ${status.clipboard_received} received` : "");
     shareStats.classList.toggle("error", Boolean(status.error));
     if (status.error) {
       shareStats.textContent = status.error;
@@ -155,6 +300,17 @@
     }
     shareToggle.disabled = false;
   });
+
+  for (const [box, command] of [[shareClipboard, "set_share_clipboard"], [shareFiles, "set_share_files"]]) {
+    box.addEventListener("change", async () => {
+      try {
+        showShare(await invoke(command, { allowed: box.checked }));
+      } catch (error) {
+        shareStats.textContent = message(error);
+        shareStats.classList.add("error");
+      }
+    });
+  }
 
   shareInput.addEventListener("change", async () => {
     try {
@@ -252,6 +408,7 @@
         data: bytes.subarray(10),
       }));
     } else if (bytes[0] === PACKET.ACCEPTED) {
+      if (capabilityTimer === null) capabilityTimer = setInterval(showCapabilities, 700);
       viewStats.textContent = "Allowed. Waiting for the first picture…";
       statsTimer = setInterval(showViewStats, 1000);
     } else if (bytes[0] === PACKET.PERMISSIONS) {
@@ -361,6 +518,39 @@
   // Keys must not stay down on the host when the viewer looks away.
   canvas.addEventListener("blur", releaseHeldKeys);
 
+  // ---- Viewer: clipboard and files -----------------------------------------
+
+  const viewClipboard = $("view-clipboard");
+  let capabilityTimer = null;
+
+  async function showCapabilities() {
+    const status = await invoke("view_capability_status").catch(() => null);
+    const available = Boolean(status) && viewing;
+    viewClipboard.disabled = !(available && status.clipboard_available && status.clipboard_host_allows);
+    if (viewClipboard.disabled && !available) viewClipboard.checked = false;
+    $("view-clipboard-label").textContent = !available || !status.clipboard_available
+      ? "Sync clipboard text with the host"
+      : !status.clipboard_host_allows
+        ? "Sync clipboard text with the host (the host has not allowed it)"
+        : status.clipboard_active
+          ? `Syncing clipboard text — ${status.clipboard_sent} sent, ${status.clipboard_received} received`
+          : "Sync clipboard text with the host";
+    $("transfers-viewer").hidden = !available;
+    $("view-file").disabled = !(available && status.transfers.allowed);
+    renderTransfers("viewer", available ? status.transfers : null);
+    if (!available && capabilityTimer !== null) {
+      clearInterval(capabilityTimer);
+      capabilityTimer = null;
+    }
+  }
+
+  viewClipboard.addEventListener("change", () => {
+    invoke("set_view_clipboard", { wanted: viewClipboard.checked }).catch((error) => {
+      viewClipboard.checked = false;
+      viewStats.textContent = message(error);
+    });
+  });
+
   function showViewStats() {
     const now = performance.now();
     const drawn = totals.drawn - lastTick.drawn;
@@ -384,6 +574,8 @@
     viewPort.disabled = false;
     $("view-host").hidden = true;
     setHostAllowsControl(false);
+    viewClipboard.checked = false;
+    showCapabilities();
     viewStats.classList.remove("error");
     viewStats.textContent = `Ended: ${reason}. ${totals.drawn} frames shown.`;
   }
