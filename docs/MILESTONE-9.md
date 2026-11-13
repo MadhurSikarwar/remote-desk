@@ -127,6 +127,9 @@ node tests run in CI.
   host again after it re-registers, but that path was only covered by the
   existing Milestone 7 tests, not by a reconnect test.
 - **Sleep, hibernate and network changes** (Wi-Fi to cable) were not tried.
+- **A link slower than the video needs makes the picture lag by tens of
+  seconds** and nothing reacts (measured through a Linux relay in WSL with a
+  bandwidth cap; see `NETWORK-TESTS.md`).
 - **`video.adaptive_quality` does nothing.** The setting exists and defaults
   to true, but no code reads it: the encoder runs at the configured bitrate
   whatever the link does. Nothing here measured or adapted to bandwidth.
