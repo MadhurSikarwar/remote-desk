@@ -1,12 +1,17 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::link::Baseline;
 
 /// A path with a fixed capacity and a buffer in front of it, the sender's
 /// video, and pings that wait in the same buffer: what the controller is up
 /// against, without a network.
 struct Path {
     capacity_kbps: f64,
+    /// The round trip of the path itself, with nothing queued.
+    rtt_ms: f64,
+    /// Round trips measured since the last step.
+    measured: Vec<f64>,
     /// Bytes waiting.
     queued: f64,
     /// Pings on their way: when each was sent and when it comes back.
@@ -25,6 +30,8 @@ impl Path {
     fn new(capacity_kbps: f64) -> Self {
         Self {
             capacity_kbps,
+            rtt_ms: 1.0,
+            measured: Vec::new(),
             queued: 0.0,
             pings: Vec::new(),
             last_ping: -1.0,
@@ -39,7 +46,8 @@ impl Path {
     }
 
     /// Advances one tick with the sender putting in `kbps`, and returns the
-    /// delay the sender can know about at time `now`.
+    /// round trip the sender can know about at time `now`: the latest
+    /// answer, or how long the oldest unanswered ping has been waiting.
     fn step(&mut self, now: f64, kbps: f64) -> f64 {
         let per_tick = |kbps: f64| kbps * 1000.0 / 8.0 * TICK;
         self.queued += per_tick(kbps);
@@ -49,11 +57,13 @@ impl Path {
 
         if now - self.last_ping >= PING_EVERY {
             self.last_ping = now;
-            self.pings.push((now, now + self.lag_ms() / 1000.0));
+            self.pings
+                .push((now, now + (self.rtt_ms + self.lag_ms()) / 1000.0));
         }
         while self.pings.first().is_some_and(|(_, back)| *back <= now) {
             let (sent, back) = self.pings.remove(0);
             self.latest_rtt_ms = (back - sent) * 1000.0;
+            self.measured.push(self.latest_rtt_ms);
         }
         let waiting_ms = self
             .pings
@@ -82,6 +92,18 @@ fn run(
     adaptive: bool,
     capacity: impl Fn(f64) -> f64,
 ) -> Run {
+    run_on(max_kbps, seconds, settle, adaptive, capacity, |_| 1.0)
+}
+
+/// As [`run`], with the path's own round trip given per second by `rtt_ms`.
+fn run_on(
+    max_kbps: u32,
+    seconds: usize,
+    settle: usize,
+    adaptive: bool,
+    capacity: impl Fn(f64) -> f64,
+    rtt_ms: impl Fn(f64) -> f64,
+) -> Run {
     let start = Instant::now();
     let mut controller = Controller::new(max_kbps);
     let mut path = Path::new(capacity(0.0));
@@ -94,11 +116,13 @@ fn run(
         ticks: 0,
     };
     let mut delay = 0.0;
+    let mut baseline = Baseline::default();
     let mut delivered_at_settle = 0.0;
     let steps = (seconds as f64 / TICK) as usize;
     for i in 0..steps {
         let now = i as f64 * TICK;
         path.capacity_kbps = capacity(now);
+        path.rtt_ms = rtt_ms(now);
         let decision = if adaptive {
             controller.update(start + Duration::from_secs_f64(now), delay)
         } else {
@@ -118,7 +142,16 @@ fn run(
         } else {
             0.0
         };
-        delay = path.step(now, sending);
+        // As the link does it: queueing is what the round trip shows beyond
+        // the path's own.
+        let at = start + Duration::from_secs_f64(now);
+        let known = path.step(now, sending);
+        for rtt in path.measured.drain(..) {
+            baseline.record(at, rtt);
+        }
+        delay = baseline
+            .base_ms(at)
+            .map_or(0.0, |base| (known - base).max(0.0));
         out.worst_lag_ms = out.worst_lag_ms.max(path.lag_ms());
         if now >= settle as f64 {
             out.worst_lag_after_ms = out.worst_lag_after_ms.max(path.lag_ms());
@@ -240,31 +273,32 @@ fn the_rate_never_goes_below_the_minimum_or_above_the_maximum() {
 }
 
 #[test]
-#[ignore = "prints a timeline; for looking at, not for checking"]
-fn timeline() {
-    let start = Instant::now();
-    let mut controller = Controller::new(4000);
-    let mut path = Path::new(300.0);
-    let mut delay = 0.0;
-    for i in 0..(40.0 / TICK) as usize {
-        let now = i as f64 * TICK;
-        let d = controller.update(start + Duration::from_secs_f64(now), delay);
-        delay = path.step(
-            now,
-            if d.send {
-                f64::from(d.bitrate_kbps)
+fn a_path_that_gets_longer_is_not_mistaken_for_one_that_is_full() {
+    // After 20 s every round trip takes 200 ms longer (another route, a
+    // relay), and for the first few seconds the path is also nearly blocked,
+    // so the video is on hold when the change comes. Seen live before the
+    // baseline moved with the path: the hold never ended, because 200 ms
+    // over the old baseline is neither clearly congested nor clearly clear.
+    let r = run_on(
+        4000,
+        120,
+        50,
+        true,
+        |t| {
+            if (20.0..26.0).contains(&t) {
+                100.0
             } else {
-                0.0
-            },
-        );
-        if i % 10 == 0 {
-            eprintln!(
-                "{now:5.1}s send={} rate={:4} known={:6.0} lag={:6.0}",
-                u8::from(d.send),
-                d.bitrate_kbps,
-                delay,
-                path.lag_ms()
-            );
-        }
-    }
+                50_000.0
+            }
+        },
+        |t| if t < 20.0 { 1.0 } else { 201.0 },
+    );
+    eprintln!(
+        "longer path: held {:.0}% of the whole run, delivered {:.0} kbps after settling, ends at {} kbps",
+        100.0 * r.held_ticks as f64 / r.ticks as f64,
+        r.delivered_kbps_late,
+        r.final_kbps
+    );
+    assert_eq!(r.final_kbps, 4000);
+    assert!(r.delivered_kbps_late > 3000.0, "{}", r.delivered_kbps_late);
 }

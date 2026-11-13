@@ -190,3 +190,49 @@ fn the_bit_rate_can_be_changed_while_encoding() {
         Err(CodecError::InvalidConfig(_))
     ));
 }
+
+#[test]
+fn changing_the_bit_rate_does_not_force_a_keyframe() {
+    let mut encoder = H264Encoder::new(config()).unwrap();
+    let before = encode_frames(&mut encoder, 0..20);
+    assert!(before[0].keyframe);
+    let mut keyframes = Vec::new();
+    for (step, kbps) in [800, 600, 400, 700, 1000].into_iter().enumerate() {
+        encoder.set_bitrate_kbps(kbps).unwrap();
+        let start = 20 + step * 10;
+        for (i, frame) in encode_frames(&mut encoder, start..start + 10)
+            .iter()
+            .enumerate()
+        {
+            if frame.keyframe {
+                keyframes.push((kbps, start + i, frame.data.len()));
+            }
+        }
+    }
+    eprintln!("keyframes after bit rate changes: {keyframes:?}");
+    assert!(keyframes.is_empty(), "{keyframes:?}");
+}
+
+#[test]
+fn an_encoder_created_at_a_low_rate_can_be_raised_later() {
+    // How a session starts: low, then up as the connection allows.
+    let mut encoder = H264Encoder::new(EncoderConfig {
+        bitrate_kbps: 300,
+        ..config()
+    })
+    .unwrap();
+    bytes_for(&mut encoder, 0..30);
+    let low = bytes_for(&mut encoder, 30..90);
+    encoder.set_bitrate_kbps(4000).unwrap();
+    bytes_for(&mut encoder, 90..120);
+    let high = bytes_for(&mut encoder, 120..180);
+    eprintln!("60 frames of noise: {low} bytes created at 300 kbps, {high} after raising to 4000");
+    assert!(
+        low < 60 * 300_000 / 8 / 30 * 3,
+        "300 kbps produced {low} bytes"
+    );
+    assert!(
+        high > low * 3,
+        "raising produced {high} bytes against {low}"
+    );
+}

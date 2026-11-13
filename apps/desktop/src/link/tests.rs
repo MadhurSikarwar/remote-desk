@@ -229,3 +229,30 @@ fn a_writer_stuck_on_a_peer_that_never_reads_is_freed_by_the_write_timeout() {
         link.lost_reason().is_some()
     });
 }
+
+#[test]
+fn the_paths_own_round_trip_is_the_lowest_recent_one_not_the_lowest_ever() {
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let mut baseline = Baseline::default();
+    assert_eq!(baseline.base_ms(at(0)), None);
+
+    // A short path, with some queueing on top now and then.
+    for (i, rtt) in [1.0, 40.0, 1.2, 300.0, 0.9].into_iter().enumerate() {
+        baseline.record(at(i as u64 * 250), rtt);
+    }
+    assert_eq!(baseline.base_ms(at(1_000)), Some(0.9));
+
+    // The path gets longer (a relay, another route): 200 ms from now on.
+    for i in 0..60 {
+        baseline.record(at(2_000 + i * 250), 200.0 + (i % 3) as f64);
+    }
+    // While the old measurements are recent they still count...
+    assert_eq!(baseline.base_ms(at(9_000)), Some(0.9));
+    // ...and once they have aged out, the longer path is the baseline, so it
+    // no longer looks like 200 ms of queueing.
+    assert_eq!(baseline.base_ms(at(17_000)), Some(200.0));
+
+    // With nothing measured for a long time the last answer stands.
+    assert_eq!(baseline.base_ms(at(120_000)), Some(200.0));
+}

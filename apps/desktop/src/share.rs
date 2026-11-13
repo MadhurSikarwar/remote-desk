@@ -716,14 +716,20 @@ fn stream_frames(
         }
 
         // A new encoder (first frame, or the screen size changed) starts with
-        // a keyframe; tell the viewer the size first.
-        let wanted = EncoderConfig {
-            width,
-            height,
-            fps: settings.max_fps,
-            bitrate_kbps: settings.bitrate_kbps,
-        };
-        if encoder.as_ref().map(H264Encoder::config) != Some(wanted) {
+        // a keyframe; tell the viewer the size first. It is created at the
+        // bit rate wanted now, because a rate set before its first frame is
+        // not reliably taken up; later changes are made while it runs.
+        let fitting = encoder.as_ref().is_some_and(|e| {
+            let c = e.config();
+            (c.width, c.height, c.fps) == (width, height, settings.max_fps)
+        });
+        if !fitting {
+            let wanted = EncoderConfig {
+                width,
+                height,
+                fps: settings.max_fps,
+                bitrate_kbps: decision.bitrate_kbps,
+            };
             encoder = Some(H264Encoder::new(wanted).map_err(|e| e.to_string())?);
             writer.send(&Message::VideoConfig {
                 width,

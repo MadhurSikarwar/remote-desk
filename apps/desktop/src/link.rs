@@ -27,6 +27,10 @@ const TICK: Duration = Duration::from_millis(50);
 /// Pings that have not been answered yet and are still remembered. Enough
 /// to see a delay of a minute at four pings a second.
 const OUTSTANDING: usize = 256;
+/// The path's own round trip is taken to be the lowest seen in this long.
+/// Not the lowest ever: a path can get longer (another route, a relay), and
+/// measured against an old low it would look congested for good.
+const BASE_WINDOW: Duration = Duration::from_secs(10);
 /// Weight of the newest measurement in the smoothed round-trip time.
 const SMOOTHING: f64 = 0.2;
 
@@ -66,8 +70,39 @@ pub struct LinkStats {
     pub pongs_received: u64,
 }
 
+/// The round trip of the path itself, without queueing: the lowest recent
+/// measurement.
+#[derive(Default)]
+pub(crate) struct Baseline {
+    recent: VecDeque<(Instant, f64)>,
+    /// The last answer, kept for when every measurement has aged out (pings
+    /// stuck in a long queue).
+    last: Option<f64>,
+}
+
+impl Baseline {
+    pub(crate) fn record(&mut self, now: Instant, rtt_ms: f64) {
+        self.recent.push_back((now, rtt_ms));
+    }
+
+    pub(crate) fn base_ms(&mut self, now: Instant) -> Option<f64> {
+        while self
+            .recent
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) > BASE_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        if let Some(lowest) = self.recent.iter().map(|(_, rtt)| *rtt).reduce(f64::min) {
+            self.last = Some(lowest);
+        }
+        self.last
+    }
+}
+
 #[derive(Default)]
 struct Measurements {
+    baseline: Baseline,
     next_nonce: u64,
     outstanding: VecDeque<(u64, Instant)>,
     latest: Option<f64>,
@@ -130,6 +165,7 @@ impl Link {
         };
         let rtt = now.duration_since(sent).as_secs_f64() * 1000.0;
         m.pongs_received += 1;
+        m.baseline.record(now, rtt);
         m.latest = Some(rtt);
         m.average = Some(m.average.map_or(rtt, |a| a + SMOOTHING * (rtt - a)));
         m.best = Some(m.best.map_or(rtt, |b| b.min(rtt)));
@@ -156,8 +192,8 @@ impl Link {
     /// has not come back yet counts for as long as it has been waiting, so a
     /// delay is noticed while it grows and not only after it has passed.
     pub fn queue_delay_ms(&self) -> f64 {
-        let m = lock(&self.measurements);
-        let Some(best) = m.best else {
+        let mut m = lock(&self.measurements);
+        let Some(best) = m.baseline.base_ms(Instant::now()) else {
             return 0.0;
         };
         let waiting = m
