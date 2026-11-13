@@ -100,6 +100,16 @@ impl AppState {
         self.lock().clone()
     }
 
+    /// Where files received from the other end are saved: a folder of its
+    /// own inside the user's Downloads, or inside the settings folder when
+    /// there is no Downloads.
+    pub fn received_folder(&self) -> std::path::PathBuf {
+        directories::UserDirs::new()
+            .and_then(|dirs| dirs.download_dir().map(|d| d.join("Remote Control")))
+            .or_else(|| self.paths.as_ref().map(|p| p.config_dir.join("received")))
+            .unwrap_or_else(|| std::path::PathBuf::from("Remote Control"))
+    }
+
     pub fn security(&self) -> Option<Arc<Security>> {
         self.security.as_ref().ok().cloned()
     }

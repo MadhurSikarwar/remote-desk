@@ -2800,7 +2800,9 @@ dependencies = [
 name = "rc-desktop"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "rc-capture",
+ "rc-clipboard",
  "rc-codec",
  "rc-core",
  "rc-crypto",

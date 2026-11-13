@@ -30,7 +30,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rc_protocol::{Message, MAX_FILE_CHUNK_BYTES};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::secure::lock;
@@ -49,7 +49,7 @@ const KEEP_FINISHED: usize = 12;
 const SEND_RATE: u64 = 8 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     Incoming,
@@ -677,8 +677,8 @@ impl Transfers {
         Ok(id)
     }
 
-    /// The state of one of this end's outgoing transfers, so the caller can
-    /// wait for acceptance and notice a refusal.
+    /// The state of one of this end's outgoing transfers.
+    #[cfg(test)]
     pub fn outgoing_state(&self, id: u32) -> Option<State> {
         lock(&self.inner)
             .find(Direction::Outgoing, id)

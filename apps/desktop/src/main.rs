@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capabilities;
 mod commands;
 mod rendezvous;
 mod secure;
@@ -89,6 +90,16 @@ fn main() {
             commands::stop_share,
             commands::share_status,
             commands::set_share_input,
+            commands::set_share_clipboard,
+            commands::set_share_files,
+            commands::set_view_clipboard,
+            commands::view_capability_status,
+            commands::transfer_status,
+            commands::transfer_answer,
+            commands::transfer_offer,
+            commands::transfer_chunk,
+            commands::transfer_finish,
+            commands::transfer_cancel,
             commands::answer_approval,
             commands::view_connect,
             commands::discover_devices,

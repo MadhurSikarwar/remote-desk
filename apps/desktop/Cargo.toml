@@ -9,7 +9,9 @@ publish.workspace = true
 tauri-build = { workspace = true }
 
 [dependencies]
+directories.workspace = true
 rc-capture = { path = "../../crates/rc-capture" }
+rc-clipboard = { path = "../../crates/rc-clipboard" }
 rc-codec = { path = "../../crates/rc-codec" }
 rc-core = { path = "../../crates/rc-core" }
 rc-crypto = { path = "../../crates/rc-crypto" }

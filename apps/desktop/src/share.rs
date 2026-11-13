@@ -28,6 +28,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rc_capture::{CaptureError, Capturer, DisplayInfo};
+use rc_clipboard::MemoryClipboard;
 use rc_codec::nv12::{bgra_to_nv12, even, nv12_len};
 use rc_codec::{EncoderConfig, H264Encoder};
 use rc_crypto::channel::Side;
@@ -37,9 +38,11 @@ use rc_net::{Announcement, Responder};
 use rc_protocol::{InputEvent, Message, Permissions, Role, PROTOCOL_VERSION};
 use serde::Serialize;
 
+use crate::capabilities::Capabilities;
 use crate::rendezvous::{keep_registered, Registration, ServerLink};
 pub use crate::secure::lock;
 use crate::secure::{establish, exchange_hello, Peer, SecureReader, SecureWriter, Security};
+use crate::transfer::TransferStatus;
 
 /// Wait for a screen change this long before checking the stop flag again.
 const POLL_MS: u32 = 100;
@@ -64,6 +67,15 @@ pub struct ShareSettings {
     /// Whether a viewer may control mouse and keyboard when sharing starts.
     /// The user can change it while sharing is on.
     pub allow_input: bool,
+    /// Whether clipboard text may be synchronised when sharing starts. Can
+    /// be changed while sharing is on.
+    pub allow_clipboard: bool,
+    /// Whether files may be sent in either direction when sharing starts.
+    pub allow_files: bool,
+    /// Where files received from the viewer are saved.
+    pub received_folder: std::path::PathBuf,
+    /// Replaces the system clipboard; for tests.
+    pub clipboard: Option<MemoryClipboard>,
     /// Accept connections from other computers, not only this one.
     pub allow_remote: bool,
     /// While `allow_remote` is on, answer discovery queries on the network.
@@ -130,6 +142,10 @@ struct Shared {
     error: Mutex<Option<String>>,
     /// The host's switch: may the viewer control mouse and keyboard?
     input_allowed: AtomicBool,
+    clipboard_allowed: AtomicBool,
+    files_allowed: AtomicBool,
+    /// The running session's clipboard and file transfers, if any.
+    capabilities: Mutex<Option<Arc<Capabilities>>>,
     /// Input events acted on, and events ignored because input was off.
     input_events: AtomicU64,
     input_ignored: AtomicU64,
@@ -168,6 +184,7 @@ impl Shared {
                     .as_secs(),
                 ..a.request.clone()
             });
+        let capabilities = lock(&self.capabilities).clone();
         ShareStatus {
             active,
             port: Some(port),
@@ -180,6 +197,14 @@ impl Shared {
             blocked: self.blocked.load(Ordering::Relaxed),
             error: lock(&self.error).clone(),
             input_allowed: active && self.input_allowed.load(Ordering::Relaxed),
+            clipboard_allowed: active && self.clipboard_allowed.load(Ordering::Relaxed),
+            files_allowed: active && self.files_allowed.load(Ordering::Relaxed),
+            clipboard_sent: capabilities.as_ref().map_or(0, |c| c.clipboard_counts().0),
+            clipboard_received: capabilities.as_ref().map_or(0, |c| c.clipboard_counts().1),
+            transfers: capabilities
+                .as_ref()
+                .filter(|_| active)
+                .map(|c| c.transfers.status()),
             input_events: self.input_events.load(Ordering::Relaxed),
             input_ignored: self.input_ignored.load(Ordering::Relaxed),
             pending,
@@ -261,6 +286,15 @@ pub struct ShareStatus {
     pub error: Option<String>,
     /// The viewer may control mouse and keyboard.
     pub input_allowed: bool,
+    /// Clipboard text may be synchronised with the viewer.
+    pub clipboard_allowed: bool,
+    /// Files may be sent in either direction.
+    pub files_allowed: bool,
+    /// Pieces of clipboard text sent to and received from the viewer.
+    pub clipboard_sent: u64,
+    pub clipboard_received: u64,
+    /// The current session's file transfers, while one is running.
+    pub transfers: Option<TransferStatus>,
     /// Input events from the viewer that were carried out.
     pub input_events: u64,
     /// Input events discarded because control was not allowed.
@@ -443,6 +477,14 @@ fn run_session(
     }
     writer.send(&Message::Accepted)?;
     shared.viewer_connected.store(true, Ordering::Relaxed);
+    let writer = Arc::new(writer);
+    let capabilities = Arc::new(Capabilities::new(
+        Arc::clone(&writer),
+        settings.received_folder.clone(),
+        shared.files_allowed.load(Ordering::Relaxed),
+        settings.clipboard.clone(),
+    ));
+    *lock(&shared.capabilities) = Some(Arc::clone(&capabilities));
 
     let display = rc_capture::list_displays()
         .map_err(|e| e.to_string())?
@@ -467,6 +509,7 @@ fn run_session(
         let finished = Arc::clone(&finished);
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
         let injector = Arc::clone(&injector);
+        let capabilities = Arc::clone(&capabilities);
         let counters = Arc::clone(shared);
         // The permission is checked for every single event, under the same
         // lock the revocation takes, so nothing is injected after "off".
@@ -491,7 +534,12 @@ fn run_session(
                         ControlFlow::Continue(())
                     }
                     Message::Bye { .. } => ControlFlow::Break(()),
-                    _ => ControlFlow::Continue(()),
+                    // Clipboard and file messages; each is ignored while its
+                    // switch is off.
+                    other => {
+                        capabilities.handle(&other);
+                        ControlFlow::Continue(())
+                    }
                 });
                 closed.store(true, Ordering::Relaxed);
             })
@@ -505,9 +553,12 @@ fn run_session(
         &closed,
         &keyframe_wanted,
         &injector,
+        &capabilities,
     );
     tracing::debug!("frame loop ended");
     lock(&injector).release_all();
+    capabilities.end();
+    *lock(&shared.capabilities) = None;
 
     let reason = match &result {
         Ok(reason) => (*reason).to_owned(),
@@ -529,13 +580,14 @@ fn stream_frames(
     closed: &AtomicBool,
     keyframe_wanted: &AtomicBool,
     injector: &Mutex<Injector>,
+    capabilities: &Capabilities,
 ) -> Result<&'static str, String> {
     let mut capturer = Capturer::new(settings.display).map_err(|e| e.to_string())?;
     let mut encoder: Option<H264Encoder> = None;
     let mut nv12 = Vec::new();
     let mut pacer = Pacer::new(settings.max_fps, Instant::now());
     // What the viewer has been told; `None` until the first message.
-    let mut announced: Option<bool> = None;
+    let mut announced: Option<Permissions> = None;
 
     loop {
         if shared.stop.load(Ordering::Relaxed) {
@@ -545,18 +597,22 @@ fn stream_frames(
             return Ok("viewer disconnected");
         }
 
-        // Tell the viewer whenever the host's control switch changes, and
-        // drop whatever the viewer was holding when it is switched off.
-        let input = shared.input_allowed.load(Ordering::Relaxed);
-        if announced != Some(input) {
-            if !input {
+        // Tell the viewer whenever one of the host's switches changes, and
+        // apply the change here first: input held down is let go, and
+        // clipboard and file transfer stop at once when switched off.
+        let wanted = Permissions {
+            input: shared.input_allowed.load(Ordering::Relaxed),
+            clipboard: shared.clipboard_allowed.load(Ordering::Relaxed),
+            files: shared.files_allowed.load(Ordering::Relaxed),
+        };
+        if announced != Some(wanted) {
+            if !wanted.input {
                 lock(injector).release_all();
             }
-            writer.send(&Message::Permissions(Permissions {
-                input,
-                ..Permissions::default()
-            }))?;
-            announced = Some(input);
+            capabilities.set_clipboard(wanted.clipboard);
+            capabilities.set_files(wanted.files);
+            writer.send(&Message::Permissions(wanted))?;
+            announced = Some(wanted);
         }
 
         let frame = match capturer.next_frame(POLL_MS) {
@@ -836,6 +892,12 @@ impl ShareController {
         shared
             .input_allowed
             .store(settings.allow_input, Ordering::Relaxed);
+        shared
+            .clipboard_allowed
+            .store(settings.allow_clipboard, Ordering::Relaxed);
+        shared
+            .files_allowed
+            .store(settings.allow_files, Ordering::Relaxed);
 
         // Answer "who is sharing?" only when other computers may connect.
         let discoverable = settings.allow_remote && settings.lan_discovery;
@@ -944,6 +1006,36 @@ impl ShareController {
         self.status()
     }
 
+    /// Allows or forbids clipboard text sync. Takes effect at once.
+    pub fn set_clipboard_allowed(&self, allowed: bool) -> ShareStatus {
+        if let Some(worker) = lock(&self.worker).as_ref() {
+            worker
+                .shared
+                .clipboard_allowed
+                .store(allowed, Ordering::Relaxed);
+        }
+        self.status()
+    }
+
+    /// Allows or forbids file transfer. Forbidding ends transfers in
+    /// progress.
+    pub fn set_files_allowed(&self, allowed: bool) -> ShareStatus {
+        if let Some(worker) = lock(&self.worker).as_ref() {
+            worker
+                .shared
+                .files_allowed
+                .store(allowed, Ordering::Relaxed);
+        }
+        self.status()
+    }
+
+    /// The running session's clipboard and file transfers.
+    pub fn capabilities(&self) -> Option<Arc<Capabilities>> {
+        lock(&self.worker)
+            .as_ref()
+            .and_then(|w| lock(&w.shared.capabilities).clone())
+    }
+
     fn extras(worker: &Worker) -> (bool, bool, Option<String>) {
         (
             worker.remote,
@@ -976,6 +1068,11 @@ impl ShareController {
                 blocked: false,
                 error: None,
                 input_allowed: false,
+                clipboard_allowed: false,
+                files_allowed: false,
+                clipboard_sent: 0,
+                clipboard_received: 0,
+                transfers: None,
                 input_events: 0,
                 input_ignored: 0,
                 pending: None,
@@ -1000,6 +1097,10 @@ pub mod test_support {
             max_fps: 30,
             bitrate_kbps: 4000,
             allow_input: false,
+            allow_clipboard: false,
+            allow_files: false,
+            received_folder: std::env::temp_dir().join("rc-test-received"),
+            clipboard: None,
             allow_remote: false,
             lan_discovery: false,
             server: None,
@@ -1043,5 +1144,7 @@ pub mod test_support {
     }
 }
 
+#[cfg(test)]
+mod capability_tests;
 #[cfg(test)]
 mod tests;

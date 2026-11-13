@@ -21,6 +21,21 @@ pub struct MemoryClipboard {
     state: Arc<Mutex<State>>,
 }
 
+impl PartialEq for MemoryClipboard {
+    /// Two handles are equal when they are the same clipboard.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl Eq for MemoryClipboard {}
+
+impl std::fmt::Debug for MemoryClipboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MemoryClipboard")
+    }
+}
+
 impl MemoryClipboard {
     pub fn new() -> Self {
         let clipboard = Self::default();
