@@ -109,6 +109,17 @@ impl Injector {
         }
     }
 
+    /// The rectangle mouse positions are currently mapped onto.
+    pub fn display(&self) -> Rect {
+        self.display
+    }
+
+    /// Maps positions onto a different rectangle from now on: the shared
+    /// display changed size or place. Held keys and buttons are not touched.
+    pub fn set_display(&mut self, display: Rect) {
+        self.display = display;
+    }
+
     fn absolute(&self, x: u16, y: u16) -> (i32, i32) {
         // Read each time: monitors can be added or rearranged mid-session.
         to_absolute(to_pixel(x, y, self.display), virtual_screen())
@@ -171,5 +182,47 @@ impl Drop for Injector {
         if released > 0 {
             tracing::info!(released, "released input still held by the viewer");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where a position lands on the virtual desktop, as a fraction of it,
+    /// for an injector mapped onto `display`. Nothing is injected.
+    fn lands_at(display: Rect) -> f64 {
+        let injector = Injector::new(display);
+        let (x, _) = injector.absolute(32768, 32768);
+        f64::from(x) / 65_535.0
+    }
+
+    #[test]
+    fn positions_follow_the_display_the_injector_was_last_given() {
+        let virtual_width = i64::from(virtual_screen().width);
+        assert!(virtual_width > 0);
+        let big = Rect {
+            x: 0,
+            y: 0,
+            width: virtual_width as u32,
+            height: 1000,
+        };
+        let small = Rect {
+            width: (virtual_width / 2) as u32,
+            ..big
+        };
+        let mut injector = Injector::new(big);
+        let (before, _) = injector.absolute(32768, 32768);
+
+        // The shared display became half as wide: the middle of it is now
+        // about half as far across the desktop.
+        injector.set_display(small);
+        assert_eq!(injector.display(), small);
+        let (after, _) = injector.absolute(32768, 32768);
+        assert!(
+            (f64::from(after) - f64::from(before) / 2.0).abs() < 200.0,
+            "before {before}, after {after}"
+        );
+        assert!((lands_at(big) - f64::from(before) / 65_535.0).abs() < 1e-9);
     }
 }

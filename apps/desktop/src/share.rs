@@ -701,6 +701,8 @@ fn stream_frames(
     let mut capturer = Capturer::new(settings.display).map_err(|e| e.to_string())?;
     let mut encoder: Option<H264Encoder> = None;
     let mut retained = Retained::default();
+    // Where the viewer's pointer positions are being mapped to now.
+    let mut applied = lock(injector).display();
     let mut pacer = Pacer::new(settings.max_fps, Instant::now());
     // What the viewer has been told; `None` until the first message.
     let mut announced: Option<Permissions> = None;
@@ -729,6 +731,18 @@ fn stream_frames(
             capabilities.set_files(wanted.files);
             writer.send(&Message::Permissions(wanted))?;
             announced = Some(wanted);
+        }
+
+        // The shared display may have changed size or moved (a resolution
+        // change, monitors rearranged); the pointer must follow it.
+        if follow_display(&mut applied, rect_of(capturer.display()), injector) {
+            tracing::info!(
+                x = applied.x,
+                y = applied.y,
+                width = applied.width,
+                height = applied.height,
+                "the shared display changed; pointer positions follow it"
+            );
         }
 
         // Hold the video back while the connection is behind: what is not
@@ -834,6 +848,27 @@ fn stream_frames(
 
         thread::sleep(pacer.after_frame(Instant::now()));
     }
+}
+
+/// The rectangle of a display, as the input mapping needs it.
+fn rect_of(display: &DisplayInfo) -> Rect {
+    Rect {
+        x: display.x,
+        y: display.y,
+        width: display.width,
+        height: display.height,
+    }
+}
+
+/// Points the injector at `current` if the display being captured is no
+/// longer where it was last mapped. Returns whether it did.
+fn follow_display(applied: &mut Rect, current: Rect, injector: &Mutex<Injector>) -> bool {
+    if *applied == current {
+        return false;
+    }
+    lock(injector).set_display(current);
+    *applied = current;
+    true
 }
 
 /// Sends encoded frames and counts them. `false` when the viewer is gone.
@@ -1361,6 +1396,8 @@ pub mod test_support {
 
 #[cfg(test)]
 mod capability_tests;
+#[cfg(test)]
+mod geometry_tests;
 #[cfg(all(test, windows))]
 mod keyframe_tests;
 #[cfg(test)]

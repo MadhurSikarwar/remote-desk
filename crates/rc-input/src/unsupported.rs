@@ -7,11 +7,21 @@ use rc_protocol::InputEvent;
 use crate::mapping::Rect;
 use crate::InputError;
 
-pub struct Injector;
+pub struct Injector {
+    display: Rect,
+}
 
 impl Injector {
-    pub fn new(_display: Rect) -> Self {
-        Self
+    pub fn new(display: Rect) -> Self {
+        Self { display }
+    }
+
+    pub fn display(&self) -> Rect {
+        self.display
+    }
+
+    pub fn set_display(&mut self, display: Rect) {
+        self.display = display;
     }
 
     pub fn inject(&mut self, _event: &InputEvent) -> Result<(), InputError> {

@@ -144,10 +144,22 @@ struct Session {
 }
 
 impl Session {
-    fn open(display: usize) -> Result<(Self, DisplayInfo), CaptureError> {
-        let (adapter, output, info) = enumerate()?
+    /// Opens display number `display`; or, when `name` is given, the display
+    /// with that name wherever it is in the list now (the number is then only
+    /// used in the error if it is gone).
+    fn open(display: usize, name: Option<&str>) -> Result<(Self, DisplayInfo), CaptureError> {
+        let found = enumerate()?;
+        let index = match name {
+            Some(name) => {
+                let infos: Vec<DisplayInfo> =
+                    found.iter().map(|(_, _, info)| info.clone()).collect();
+                crate::index_of(&infos, name).ok_or(CaptureError::NoSuchDisplay(display))?
+            }
+            None => display,
+        };
+        let (adapter, output, info) = found
             .into_iter()
-            .nth(display)
+            .nth(index)
             .ok_or(CaptureError::NoSuchDisplay(display))?;
 
         // SAFETY: the out-pointers reference live locals; the returned
@@ -232,7 +244,7 @@ pub struct Capturer {
 impl Capturer {
     /// Starts duplicating display `display` (an index from [`list_displays`]).
     pub fn new(display: usize) -> Result<Self, CaptureError> {
-        let (session, info) = Session::open(display)?;
+        let (session, info) = Session::open(display, None)?;
         tracing::info!(index = info.index, name = %info.name, width = info.width, height = info.height, "capture started");
         Ok(Self {
             display,
@@ -256,7 +268,11 @@ impl Capturer {
         if self.session.is_none() {
             // Reopening fails while the secure desktop is up; report it and
             // let the caller retry.
-            let (session, info) = Session::open(self.display)?;
+            // Found again by name: if monitors were added or removed the
+            // numbers may have moved, and the picture must not silently
+            // switch to another monitor. A monitor that is gone is an error.
+            let (session, info) = Session::open(self.display, Some(&self.info.name))?;
+            self.display = info.index;
             tracing::info!(display = self.display, "capture re-established");
             self.info = info;
             self.session = Some(session);
