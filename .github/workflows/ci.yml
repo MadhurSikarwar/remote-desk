@@ -34,3 +34,26 @@ jobs:
         run: ci/run.sh cargo test --workspace --locked
       - name: Window script tests
         run: node --test apps/desktop/ui/reconnect.test.js
+
+  # The server is the part that runs on Linux: build, lint and test it there,
+  # then check the container image and the systemd unit the deployment guide
+  # describes.
+  linux-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: rustup show && cargo -V
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: ci/run.sh cargo clippy -p rc-server -p rc-crypto -p rc-rendezvous -p rc-protocol --all-targets --locked -- -D warnings
+      - name: Test
+        run: ci/run.sh cargo test -p rc-server -p rc-crypto -p rc-rendezvous -p rc-protocol --locked
+      - name: Container image
+        run: ci/run.sh ci/server-smoke.sh
+      - name: systemd unit
+        run: |
+          ci/run.sh cargo build --release -p rc-server --locked
+          sudo install -m 755 target/release/rc-server /usr/local/bin/rc-server
+          ci/run.sh systemd-analyze verify deploy/rc-server.service

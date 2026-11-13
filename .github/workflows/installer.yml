@@ -1,0 +1,92 @@
+name: Installer
+
+# Builds the Windows installer and the Linux server binary, tests the
+# installer on a clean machine, and keeps both as downloadable artifacts of
+# the run. It does not publish a release; see docs/RELEASING.md.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "ci/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/installer.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: installer-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # Kept in step with the tauri crate in Cargo.lock.
+  TAURI_CLI_VERSION: 2.12.4
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        shell: bash
+        run: rustup show && cargo -V
+      - uses: Swatinem/rust-cache@v2
+      - name: Tauri CLI
+        shell: bash
+        run: |
+          if ! cargo tauri --version 2>/dev/null | grep -q "$TAURI_CLI_VERSION"; then
+            ci/run.sh cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
+          fi
+          cargo tauri --version
+      - name: Build installer
+        shell: bash
+        working-directory: apps/desktop
+        run: ../../ci/run.sh cargo tauri build
+      - name: Checksums
+        shell: bash
+        run: |
+          cd target/release/bundle/nsis
+          sha256sum *.exe | tee SHA256SUMS.txt
+      - name: Install, run, uninstall
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
+          ./ci/installer-test.ps1 -Installer $installer.FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/nsis/SHA256SUMS.txt
+          if-no-files-found: error
+
+  linux-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: ci/run.sh cargo build --release -p rc-server --locked
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/rc-server deploy/rc-server.service dist/
+          cd dist
+          tar -czf rc-server-linux-x86_64.tar.gz rc-server rc-server.service
+          sha256sum rc-server-linux-x86_64.tar.gz | tee SHA256SUMS.txt
+          echo "::notice title=Server binary::$(cat SHA256SUMS.txt)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-server
+          path: |
+            dist/rc-server-linux-x86_64.tar.gz
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
