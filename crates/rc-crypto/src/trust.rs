@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::{fingerprint, PublicKey, KEY_LEN};
+use crate::identity::{fingerprint, from_hex as decode_hex, to_hex as encode_hex, PublicKey};
 use crate::CryptoError;
 
 const MAX_NAME_CHARS: usize = 64;
@@ -41,21 +41,6 @@ impl TrustedDevice {
 struct File {
     #[serde(default)]
     device: Vec<TrustedDevice>,
-}
-
-fn encode_hex(key: &PublicKey) -> String {
-    key.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn decode_hex(text: &str) -> Option<PublicKey> {
-    if text.len() != 2 * KEY_LEN || !text.is_ascii() {
-        return None;
-    }
-    let mut key = [0u8; KEY_LEN];
-    for (byte, pair) in key.iter_mut().zip(text.as_bytes().chunks(2)) {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(key)
 }
 
 /// Keeps a device name printable and of bounded length.
@@ -193,8 +178,8 @@ impl TrustStore {
 mod tests {
     use super::*;
 
-    const KEY_A: PublicKey = [0xA1; KEY_LEN];
-    const KEY_B: PublicKey = [0xB2; KEY_LEN];
+    const KEY_A: PublicKey = [0xA1; 32];
+    const KEY_B: PublicKey = [0xB2; 32];
 
     fn store(dir: &tempfile::TempDir) -> TrustStore {
         TrustStore::load(&dir.path().join("trusted.toml")).unwrap()
@@ -220,7 +205,7 @@ mod tests {
         let laptop = reloaded.get(&KEY_A).unwrap();
         assert_eq!((laptop.name.as_str(), laptop.approved_at), ("Laptop", 1000));
         assert_eq!(laptop.fingerprint().unwrap(), fingerprint(&KEY_A));
-        assert!(reloaded.get(&[0; KEY_LEN]).is_none());
+        assert!(reloaded.get(&[0; 32]).is_none());
     }
 
     #[test]

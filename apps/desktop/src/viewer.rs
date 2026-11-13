@@ -2,10 +2,10 @@
 //! which decodes and draws it.
 //!
 //! Every connection starts with an encrypted handshake; the session itself
-//! begins only once the person at the host has allowed it. Connections
-//! still go to 127.0.0.1 only.
+//! begins only once the person at the host has allowed it. The host may be
+//! on this computer or any other that can be reached.
 
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rc_crypto::channel::Side;
+use rc_crypto::{fingerprint, PublicKey};
 use rc_input::keymap::scancode_for;
 use rc_protocol::{InputEvent, Message, MouseButton, Role};
 use serde::{Deserialize, Serialize};
@@ -142,6 +143,45 @@ fn to_packet(message: Message) -> Option<Vec<u8>> {
     }
 }
 
+/// Turns what the user typed into an address to connect to.
+///
+/// A bare port number means a host on this computer. Otherwise `host:port`,
+/// where `host` is an IPv4 address or a name; names are looked up, and an
+/// IPv4 result is preferred because that is what hosts listen on.
+pub fn resolve_address(text: &str) -> Result<SocketAddr, String> {
+    let text = text.trim();
+    let bad_port = || "The port must be a number from 1 to 65535".to_owned();
+    if text.is_empty() {
+        return Err("Enter the address shown by the sharing device".to_owned());
+    }
+    if text.bytes().all(|b| b.is_ascii_digit()) {
+        let port: u16 = text.parse().map_err(|_| bad_port())?;
+        if port == 0 {
+            return Err(bad_port());
+        }
+        return Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+    }
+    let (host, port) = text
+        .rsplit_once(':')
+        .ok_or("Enter the address as host:port, for example 192.168.1.20:51000")?;
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return Err("The host part of the address is not valid".to_owned());
+    }
+    match port.parse::<u16>() {
+        Ok(port) if port != 0 => {}
+        _ => return Err(bad_port()),
+    }
+    let mut found = text
+        .to_socket_addrs()
+        .map_err(|e| format!("Cannot find {host}: {e}"))?
+        .collect::<Vec<_>>();
+    found.sort_by_key(|address| !address.is_ipv4());
+    found
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("Cannot find {host}"))
+}
+
 /// The host a viewer has reached, for the person to check before the host
 /// decides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -175,11 +215,22 @@ impl ViewerController {
         }
     }
 
-    /// Connects to a host on this computer, completes the encrypted
-    /// handshake and returns who answered. Packets then arrive on `sink`
-    /// from a background thread: `ACCEPTED` once the host allows the
+    /// Connects to `address` (see [`resolve_address`]), completes the
+    /// encrypted handshake and returns who answered. Packets then arrive on
+    /// `sink` from a background thread: `ACCEPTED` once the host allows the
     /// session, and always `ENDED` last.
-    pub fn connect<F>(&self, port: u16, device_name: &str, sink: F) -> Result<HostInfo, String>
+    ///
+    /// With `expected_key` — the key a discovery reply announced — the
+    /// connection is dropped if the device that answers holds a different
+    /// one, so a viewer does not end up with whoever happens to be at an
+    /// address.
+    pub fn connect<F>(
+        &self,
+        address: &str,
+        expected_key: Option<PublicKey>,
+        device_name: &str,
+        sink: F,
+    ) -> Result<HostInfo, String>
     where
         F: Fn(Vec<u8>) + Send + 'static,
     {
@@ -192,12 +243,20 @@ impl ViewerController {
             return Err("Already viewing a screen".to_owned());
         }
 
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-            .map_err(|e| format!("cannot connect to port {port}: {e}"))?;
+        let target = resolve_address(address)?;
+        let stream = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT)
+            .map_err(|e| format!("cannot connect to {target}: {e}"))?;
         let (writer, mut reader, peer) =
             establish(&stream, security.identity(), Side::Initiator)
                 .map_err(|e| format!("could not set up a secure connection: {e}"))?;
+        if let Some(expected) = expected_key.filter(|key| *key != peer.public) {
+            writer.shutdown();
+            return Err(format!(
+                "The device at {target} is not the one you picked: it has key {} but {} was expected",
+                peer.fingerprint,
+                fingerprint(&expected)
+            ));
+        }
         let name = exchange_hello(&writer, &mut reader, Role::Viewer, device_name)?;
         let host = HostInfo {
             name,
@@ -241,7 +300,7 @@ impl ViewerController {
         };
 
         tracing::info!(
-            port,
+            %target,
             host = host.name,
             fingerprint = host.fingerprint,
             "connected; waiting for the host to allow viewing"

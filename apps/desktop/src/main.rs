@@ -89,6 +89,7 @@ fn main() {
             commands::set_share_input,
             commands::answer_approval,
             commands::view_connect,
+            commands::discover_devices,
             commands::view_request_keyframe,
             commands::view_disconnect,
             commands::view_send_input,

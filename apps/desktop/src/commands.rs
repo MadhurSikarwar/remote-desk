@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use rc_core::Config;
+use rc_crypto::{fingerprint, from_hex, to_hex};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
@@ -98,19 +99,62 @@ pub fn share_status(share: State<'_, ShareController>) -> ShareStatus {
     share.status()
 }
 
-/// Connects to a host on this computer and returns who answered. Packets
-/// arrive on `packets` once the host allows the session.
+/// Connects to a host and returns who answered. Packets arrive on `packets`
+/// once the host allows the session. `expected_key` (hex) comes from a
+/// discovery result; the connection is dropped if the host holds another.
 #[tauri::command(async)]
 pub fn view_connect(
     state: State<'_, AppState>,
     viewer: State<'_, ViewerController>,
-    port: u16,
+    address: String,
+    expected_key: Option<String>,
     packets: Channel<InvokeResponseBody>,
 ) -> Result<HostInfo, String> {
-    viewer.connect(port, &state.config().device.name, move |packet| {
-        // Fails only once the window is gone; the session ends with it.
-        let _ = packets.send(InvokeResponseBody::Raw(packet));
-    })
+    let expected = match expected_key {
+        Some(hex) => Some(from_hex(&hex).ok_or("The device key is not valid")?),
+        None => None,
+    };
+    viewer.connect(
+        &address,
+        expected,
+        &state.config().device.name,
+        move |packet| {
+            // Fails only once the window is gone; the session ends with it.
+            let _ = packets.send(InvokeResponseBody::Raw(packet));
+        },
+    )
+}
+
+/// A device that answered a discovery query.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredDevice {
+    /// What it calls itself. Not verified.
+    pub name: String,
+    /// `ip:port` to connect to.
+    pub address: String,
+    pub fingerprint: String,
+    /// The key it announced, hex; passed back to `view_connect`.
+    pub public_key: String,
+    /// This is the device the question came from.
+    pub this_device: bool,
+}
+
+/// Asks the local network which devices are sharing. Takes about two
+/// seconds.
+#[tauri::command(async)]
+pub fn discover_devices(state: State<'_, AppState>) -> Result<Vec<DiscoveredDevice>, String> {
+    let own = state.security().map(|s| *s.identity().public());
+    let found = rc_net::scan(Duration::from_millis(1500)).map_err(|e| e.to_string())?;
+    Ok(found
+        .into_iter()
+        .map(|f| DiscoveredDevice {
+            name: crate::secure::display_name(&f.announcement.name),
+            address: std::net::SocketAddr::new(f.address, f.announcement.port).to_string(),
+            fingerprint: fingerprint(&f.announcement.public_key),
+            public_key: to_hex(&f.announcement.public_key),
+            this_device: own == Some(f.announcement.public_key),
+        })
+        .collect())
 }
 
 #[tauri::command]

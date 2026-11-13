@@ -17,6 +17,24 @@ pub type PublicKey = [u8; KEY_LEN];
 /// File format marker, in case the layout ever changes.
 const MAGIC: &[u8; 8] = b"RCIDENT1";
 
+/// A public key as 64 lowercase hex digits.
+pub fn to_hex(key: &PublicKey) -> String {
+    key.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The inverse of [`to_hex`]; `None` for anything that is not exactly 64 hex
+/// digits.
+pub fn from_hex(text: &str) -> Option<PublicKey> {
+    if text.len() != 2 * KEY_LEN || !text.is_ascii() {
+        return None;
+    }
+    let mut key = [0u8; KEY_LEN];
+    for (byte, pair) in key.iter_mut().zip(text.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(key)
+}
+
 /// A short, human-comparable form of a public key: 16 hex digits in groups
 /// of four, taken from the SHA-256 of the key.
 pub fn fingerprint(public: &PublicKey) -> String {
@@ -156,6 +174,24 @@ mod tests {
     fn fingerprint_format_and_known_value() {
         // SHA-256 of 32 zero bytes begins 66 68 7A AD F8 62 BD 77.
         assert_eq!(fingerprint(&[0; 32]), "6668-7AAD-F862-BD77");
+    }
+
+    #[test]
+    fn hex_round_trips_and_rejects_anything_else() {
+        let key: PublicKey = std::array::from_fn(|i| i as u8 * 7);
+        assert_eq!(from_hex(&to_hex(&key)), Some(key));
+        assert_eq!(to_hex(&[0xAB; 32]), "ab".repeat(32));
+        assert_eq!(from_hex(&"AB".repeat(32)), Some([0xAB; 32]));
+        for bad in [
+            "",
+            "ab",
+            &"zz".repeat(32),
+            &"ab".repeat(31),
+            &"ab".repeat(33),
+            &"é".repeat(32),
+        ] {
+            assert_eq!(from_hex(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

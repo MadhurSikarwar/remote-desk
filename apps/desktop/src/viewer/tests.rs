@@ -11,6 +11,47 @@ use crate::share::ShareController;
 
 const WAIT: Duration = Duration::from_secs(10);
 
+fn addr(port: u16) -> String {
+    format!("127.0.0.1:{port}")
+}
+
+#[test]
+fn addresses_are_understood() {
+    let ok = |text: &str| resolve_address(text).unwrap();
+    assert_eq!(ok("51000"), SocketAddr::from((Ipv4Addr::LOCALHOST, 51000)));
+    assert_eq!(ok("  8080 "), SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)));
+    assert_eq!(
+        ok("192.168.1.20:51000"),
+        SocketAddr::from(([192, 168, 1, 20], 51000))
+    );
+    assert_eq!(ok(" 10.0.0.1:1 "), SocketAddr::from(([10, 0, 0, 1], 1)));
+    // A name that resolves on every system; IPv4 is preferred.
+    assert!(ok("localhost:5000").is_ipv4());
+    assert_eq!(ok("localhost:5000").port(), 5000);
+}
+
+#[test]
+fn bad_addresses_are_refused_with_a_reason() {
+    for bad in [
+        "",
+        "  ",
+        "0",
+        "65536",
+        "99999999999",
+        "host",
+        "192.168.1.20",
+        ":5000",
+        "a b:5000",
+        "10.0.0.1:0",
+        "10.0.0.1:99999",
+        "10.0.0.1:abc",
+        "10.0.0.1:",
+    ] {
+        let error = resolve_address(bad).unwrap_err();
+        assert!(!error.is_empty(), "{bad:?}");
+    }
+}
+
 #[test]
 fn packets_have_the_documented_layout() {
     let config = to_packet(Message::VideoConfig {
@@ -109,14 +150,46 @@ fn unknown_keys_and_buttons_are_not_forwarded() {
 #[test]
 fn connecting_fails_cleanly_without_a_key_or_a_listener() {
     let keyless = ViewerController::new(None);
-    let error = keyless.connect(1, "Me", |_| {}).unwrap_err();
+    let error = keyless.connect(&addr(1), None, "Me", |_| {}).unwrap_err();
     assert!(error.contains("key"), "{error}");
 
     let (keys, _dir) = security();
     let viewer = ViewerController::new(Some(keys));
     // Port 1 on loopback has no listener.
-    assert!(viewer.connect(1, "Me", |_| {}).is_err());
+    assert!(viewer.connect(&addr(1), None, "Me", |_| {}).is_err());
     assert!(viewer.request_keyframe().is_err());
+    viewer.disconnect();
+}
+
+#[test]
+fn a_host_with_a_different_key_than_expected_is_refused() {
+    let (port, host_keys, _host_side, _dir) = fake_host(|_| {});
+    let (viewer, sink, rx, _dir2) = collecting_viewer();
+    let wrong: PublicKey = [0x42; 32];
+
+    let error = viewer
+        .connect(&addr(port), Some(wrong), "Me", sink)
+        .unwrap_err();
+    assert!(error.contains("not the one you picked"), "{error}");
+    assert!(error.contains(&host_keys.fingerprint()), "{error}");
+    assert!(error.contains(&fingerprint(&wrong)), "{error}");
+    // Nothing reached the window.
+    assert!(rx.try_recv().is_err());
+    assert!(
+        viewer.request_keyframe().is_err(),
+        "left a connection behind"
+    );
+}
+
+#[test]
+fn the_expected_key_lets_the_right_host_through() {
+    let (port, host_keys, _host_side, _dir) = fake_host(|_| {});
+    let (viewer, sink, _rx, _dir2) = collecting_viewer();
+    let right = *host_keys.identity().public();
+    let host = viewer
+        .connect(&addr(port), Some(right), "Me", sink)
+        .unwrap();
+    assert_eq!(host.fingerprint, host_keys.fingerprint());
     viewer.disconnect();
 }
 
@@ -141,7 +214,7 @@ fn a_host_that_does_not_encrypt_is_refused() {
     let viewer = ViewerController::new(Some(keys));
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let error = viewer
-        .connect(port, "Me", move |packet| {
+        .connect(&addr(port), None, "Me", move |packet| {
             let _ = tx.send(packet);
         })
         .unwrap_err();
@@ -168,7 +241,10 @@ fn fake_host(
         let (stream, _) = listener.accept().unwrap();
         let (writer, mut reader, _) =
             establish(&stream, host_keys.identity(), Side::Responder).unwrap();
-        exchange_hello(&writer, &mut reader, Role::Host, "Fake\thost").unwrap();
+        // A viewer that turns away straight after the handshake is expected.
+        if exchange_hello(&writer, &mut reader, Role::Host, "Fake\thost").is_err() {
+            return;
+        }
         after(&writer);
         let _ = tx.send((writer, reader));
     });
@@ -194,12 +270,12 @@ fn connecting_reports_who_answered_and_waits_for_the_host() {
     let (port, host_keys, host_side, _dir) = fake_host(|_| {});
     let (viewer, sink, rx, _dir2) = collecting_viewer();
 
-    let host = viewer.connect(port, "Me", sink).unwrap();
+    let host = viewer.connect(&addr(port), None, "Me", sink).unwrap();
     assert_eq!(host.name, "Fakehost");
     assert_eq!(host.fingerprint, host_keys.fingerprint());
     assert_eq!(host.auth_code.len(), 7);
     assert!(
-        viewer.connect(port, "Me", |_| {}).is_err(),
+        viewer.connect(&addr(port), None, "Me", |_| {}).is_err(),
         "second connect"
     );
 
@@ -215,7 +291,7 @@ fn connecting_reports_who_answered_and_waits_for_the_host() {
 fn disconnect_returns_promptly_from_a_silent_host() {
     let (port, _keys, host_side, _dir) = fake_host(|_| {});
     let (viewer, sink, rx, _dir2) = collecting_viewer();
-    viewer.connect(port, "Me", sink).unwrap();
+    viewer.connect(&addr(port), None, "Me", sink).unwrap();
     let _host = host_side.recv_timeout(WAIT).unwrap();
 
     let before = std::time::Instant::now();
@@ -235,7 +311,7 @@ fn the_viewer_closes_its_side_when_the_host_refuses() {
             .unwrap();
     });
     let (viewer, sink, rx, _dir2) = collecting_viewer();
-    viewer.connect(port, "Me", sink).unwrap();
+    viewer.connect(&addr(port), None, "Me", sink).unwrap();
 
     assert_eq!(
         rx.recv_timeout(WAIT).unwrap(),
@@ -256,7 +332,9 @@ fn a_viewer_receives_the_shared_screen_once_approved() {
     let port = host.start(settings()).unwrap().port.unwrap();
     let (viewer, sink, rx, _dir2) = collecting_viewer();
 
-    let info = viewer.connect(port, "Viewer PC", sink).unwrap();
+    let info = viewer
+        .connect(&addr(port), None, "Viewer PC", sink)
+        .unwrap();
     assert_eq!(info.name, "Test host");
 
     // The host sees the same code and the viewer's name, and until it

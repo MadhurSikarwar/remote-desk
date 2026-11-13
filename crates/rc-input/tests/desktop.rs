@@ -65,9 +65,19 @@ fn the_pointer_goes_where_the_viewer_points() {
         ];
         let mut results = Vec::new();
         for ((x, y), expected) in cases {
-            injector.inject(&InputEvent::MouseMove { x, y }).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(30));
-            results.push((cursor(), expected));
+            // A person using the mouse during the test can move the pointer
+            // between the injection and the reading, so each position gets a
+            // few tries; injection that does not work fails every one.
+            let mut got = (0, 0);
+            for _ in 0..5 {
+                injector.inject(&InputEvent::MouseMove { x, y }).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                got = cursor();
+                if (got.0 - expected.0).abs() <= 1 && (got.1 - expected.1).abs() <= 1 {
+                    break;
+                }
+            }
+            results.push((got, expected));
         }
         // SAFETY: plain call; puts the pointer back where the user had it.
         unsafe { SetCursorPos(original.0, original.1).unwrap() };
