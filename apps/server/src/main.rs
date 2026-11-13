@@ -3,6 +3,8 @@
 //!     rc-server [--listen ADDR:PORT] [--data-dir DIR]
 //!
 //! Environment: `RC_LOG` sets the log filter (default `info`).
+//!
+//! Stops cleanly on Ctrl-C, and on Unix on SIGTERM.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -95,10 +97,26 @@ async fn main() -> ExitCode {
     println!("Server key: {}", server.fingerprint());
     println!("Listening on {}", server.local_addr());
 
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        eprintln!("rc-server: cannot wait for Ctrl-C: {e}");
+    if let Err(e) = stop_requested().await {
+        eprintln!("rc-server: cannot wait for a stop signal: {e}");
     }
     tracing::info!("shutting down");
     server.shutdown().await;
     ExitCode::SUCCESS
+}
+
+/// Waits until the server is asked to stop: Ctrl-C, or on Unix the
+/// termination signal that service managers and containers send.
+async fn stop_requested() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

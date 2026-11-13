@@ -1,0 +1,49 @@
+# systemd unit for the rendezvous and relay server.
+#
+#   install -m 755 rc-server /usr/local/bin/rc-server
+#   install -m 644 deploy/rc-server.service /etc/systemd/system/rc-server.service
+#   systemctl daemon-reload && systemctl enable --now rc-server
+#   journalctl -u rc-server | grep "Server key"
+#
+# The key lives in /var/lib/rc-server (kept across restarts and upgrades).
+
+[Unit]
+Description=Remote Control rendezvous and relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/rc-server --listen 0.0.0.0:21117 --data-dir %S/rc-server
+Environment=RC_LOG=info
+Restart=on-failure
+RestartSec=5
+
+# Runs as a user of its own that exists only while the service does, and
+# sees nothing of the system it does not need.
+DynamicUser=yes
+StateDirectory=rc-server
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

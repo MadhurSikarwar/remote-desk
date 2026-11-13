@@ -7,6 +7,7 @@ use crate::CryptoError;
 
 /// Mixed into the encryption so that another program running as the same
 /// user does not decrypt this by accident. Not a secret.
+#[cfg(windows)]
 const PURPOSE: &[u8] = b"RemoteControl device identity v1";
 
 #[cfg(windows)]
