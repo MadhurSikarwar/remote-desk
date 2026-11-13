@@ -76,8 +76,12 @@ fn packets_have_the_documented_layout() {
     });
     assert_eq!(bye.unwrap(), [3, b'o', b'k']);
 
-    let allowed = Message::Permissions(Permissions { input: true });
-    assert_eq!(to_packet(allowed).unwrap(), [4, 1]);
+    let allowed = Message::Permissions(Permissions {
+        input: true,
+        clipboard: true,
+        files: false,
+    });
+    assert_eq!(to_packet(allowed).unwrap(), [4, 3]);
     assert_eq!(to_packet(Message::Accepted).unwrap(), [5]);
 
     assert_eq!(to_packet(Message::KeyframeRequest), None);

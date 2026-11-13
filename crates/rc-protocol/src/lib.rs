@@ -18,13 +18,20 @@ use std::io::{self, Read, Write};
 
 /// Bumped on any incompatible change; peers with different versions refuse
 /// to talk.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Upper bound on one message, so a corrupt or hostile length prefix cannot
 /// make the reader allocate without limit. A 4K keyframe is far below this.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 const MAX_TEXT_BYTES: usize = 1024;
+
+/// Largest piece of text one clipboard message may carry.
+pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+/// Largest piece of a file one chunk message may carry.
+pub const MAX_FILE_CHUNK_BYTES: usize = 64 * 1024;
+/// Longest file name accepted, in bytes.
+pub const MAX_FILE_NAME_BYTES: usize = 255;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -76,7 +83,47 @@ pub enum InputEvent {
 /// What the host currently lets the viewer do besides watching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Permissions {
+    /// Mouse and keyboard control.
     pub input: bool,
+    /// Clipboard text may be synchronised (the viewer must also want it).
+    pub clipboard: bool,
+    /// Files may be offered in either direction (each still needs the
+    /// receiving person's acceptance).
+    pub files: bool,
+}
+
+impl Permissions {
+    pub const INPUT: u8 = 1;
+    pub const CLIPBOARD: u8 = 2;
+    pub const FILES: u8 = 4;
+
+    /// The permissions as the bit set carried on the wire.
+    pub fn bits(self) -> u8 {
+        let mut bits = 0;
+        if self.input {
+            bits |= Self::INPUT;
+        }
+        if self.clipboard {
+            bits |= Self::CLIPBOARD;
+        }
+        if self.files {
+            bits |= Self::FILES;
+        }
+        bits
+    }
+
+    /// The inverse of [`Permissions::bits`]; `None` if an unknown bit is
+    /// set.
+    pub fn from_bits(bits: u8) -> Option<Self> {
+        if bits & !(Self::INPUT | Self::CLIPBOARD | Self::FILES) != 0 {
+            return None;
+        }
+        Some(Self {
+            input: bits & Self::INPUT != 0,
+            clipboard: bits & Self::CLIPBOARD != 0,
+            files: bits & Self::FILES != 0,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +156,30 @@ pub enum Message {
     Input(InputEvent),
     /// Host to viewer, at the start of a session and whenever it changes.
     Permissions(Permissions),
+    /// Text copied on the sender's computer, in either direction. Sent only
+    /// while clipboard sync is on at both ends.
+    ClipboardText(String),
+    /// A file the sender wants to send. `id` is chosen by the sender and
+    /// names the transfer in every message about it.
+    FileOffer { id: u32, name: String, size: u64 },
+    /// The receiver's answer to an offer.
+    FileAnswer {
+        id: u32,
+        accept: bool,
+        /// Why it was refused; empty when accepted.
+        reason: String,
+    },
+    /// Part of an accepted file, in order.
+    FileChunk { id: u32, data: Vec<u8> },
+    /// The whole file has been sent; `sha256` is the hash of its bytes.
+    FileEnd { id: u32, sha256: [u8; 32] },
+    /// Either side stops a transfer. `by_sender` says whose transfer
+    /// numbering `id` belongs to.
+    FileCancel {
+        id: u32,
+        by_sender: bool,
+        reason: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +205,12 @@ mod tag {
     pub const INPUT: u8 = 6;
     pub const PERMISSIONS: u8 = 7;
     pub const ACCEPTED: u8 = 8;
+    pub const CLIPBOARD_TEXT: u8 = 9;
+    pub const FILE_OFFER: u8 = 10;
+    pub const FILE_ANSWER: u8 = 11;
+    pub const FILE_CHUNK: u8 = 12;
+    pub const FILE_END: u8 = 13;
+    pub const FILE_CANCEL: u8 = 14;
 }
 
 mod input_tag {
@@ -175,6 +252,15 @@ impl<'a> Reader<'a> {
 
     fn u32(&mut self) -> Result<u32, ProtocolError> {
         Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    /// A byte string no longer than `max`.
+    fn limited_bytes(&mut self, max: usize) -> Result<&'a [u8], ProtocolError> {
+        let bytes = self.bytes()?;
+        if bytes.len() > max {
+            return Err(ProtocolError::Malformed("too long"));
+        }
+        Ok(bytes)
     }
 
     fn i16(&mut self) -> Result<i16, ProtocolError> {
@@ -343,7 +429,51 @@ impl Message {
             }
             Self::Permissions(permissions) => {
                 out.push(tag::PERMISSIONS);
-                out.push(u8::from(permissions.input));
+                out.push(permissions.bits());
+            }
+            Self::ClipboardText(text) => {
+                out.push(tag::CLIPBOARD_TEXT);
+                let mut end = text.len().min(MAX_CLIPBOARD_BYTES);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                put_bytes(out, &text.as_bytes()[..end]);
+            }
+            Self::FileOffer { id, name, size } => {
+                out.push(tag::FILE_OFFER);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&size.to_le_bytes());
+                let mut end = name.len().min(MAX_FILE_NAME_BYTES);
+                while !name.is_char_boundary(end) {
+                    end -= 1;
+                }
+                put_bytes(out, &name.as_bytes()[..end]);
+            }
+            Self::FileAnswer { id, accept, reason } => {
+                out.push(tag::FILE_ANSWER);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.push(u8::from(*accept));
+                put_text(out, reason);
+            }
+            Self::FileChunk { id, data } => {
+                out.push(tag::FILE_CHUNK);
+                out.extend_from_slice(&id.to_le_bytes());
+                put_bytes(out, &data[..data.len().min(MAX_FILE_CHUNK_BYTES)]);
+            }
+            Self::FileEnd { id, sha256 } => {
+                out.push(tag::FILE_END);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(sha256);
+            }
+            Self::FileCancel {
+                id,
+                by_sender,
+                reason,
+            } => {
+                out.push(tag::FILE_CANCEL);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.push(u8::from(*by_sender));
+                put_text(out, reason);
             }
         }
     }
@@ -380,15 +510,39 @@ impl Message {
             tag::KEYFRAME_REQUEST => Self::KeyframeRequest,
             tag::BYE => Self::Bye { reason: r.text()? },
             tag::INPUT => Self::Input(InputEvent::decode(&mut r)?),
-            tag::PERMISSIONS => {
-                let flags = r.u8()?;
-                if flags & !1 != 0 {
-                    return Err(ProtocolError::Malformed("unknown permission"));
-                }
-                Self::Permissions(Permissions {
-                    input: flags & 1 != 0,
-                })
+            tag::PERMISSIONS => Self::Permissions(
+                Permissions::from_bits(r.u8()?)
+                    .ok_or(ProtocolError::Malformed("unknown permission"))?,
+            ),
+            tag::CLIPBOARD_TEXT => Self::ClipboardText(
+                String::from_utf8(r.limited_bytes(MAX_CLIPBOARD_BYTES)?.to_vec())
+                    .map_err(|_| ProtocolError::Malformed("text is not UTF-8"))?,
+            ),
+            tag::FILE_OFFER => {
+                let id = r.u32()?;
+                let size = r.u64()?;
+                let name = String::from_utf8(r.limited_bytes(MAX_FILE_NAME_BYTES)?.to_vec())
+                    .map_err(|_| ProtocolError::Malformed("name is not UTF-8"))?;
+                Self::FileOffer { id, name, size }
             }
+            tag::FILE_ANSWER => Self::FileAnswer {
+                id: r.u32()?,
+                accept: r.bool()?,
+                reason: r.text()?,
+            },
+            tag::FILE_CHUNK => Self::FileChunk {
+                id: r.u32()?,
+                data: r.limited_bytes(MAX_FILE_CHUNK_BYTES)?.to_vec(),
+            },
+            tag::FILE_END => Self::FileEnd {
+                id: r.u32()?,
+                sha256: r.array()?,
+            },
+            tag::FILE_CANCEL => Self::FileCancel {
+                id: r.u32()?,
+                by_sender: r.bool()?,
+                reason: r.text()?,
+            },
             other => return Err(ProtocolError::UnknownType(other)),
         };
         r.finish()?;
@@ -512,8 +666,51 @@ mod tests {
                 extended: true,
                 down: false,
             }),
-            Message::Permissions(Permissions { input: true }),
+            Message::Permissions(Permissions {
+                input: true,
+                clipboard: true,
+                files: true,
+            }),
             Message::Permissions(Permissions::default()),
+            Message::Permissions(Permissions {
+                input: false,
+                clipboard: true,
+                files: false,
+            }),
+            Message::ClipboardText("copied — ünïcode ✓".into()),
+            Message::ClipboardText(String::new()),
+            Message::FileOffer {
+                id: 7,
+                name: "report (final).pdf".into(),
+                size: u64::MAX,
+            },
+            Message::FileAnswer {
+                id: 7,
+                accept: false,
+                reason: "not now".into(),
+            },
+            Message::FileAnswer {
+                id: 8,
+                accept: true,
+                reason: String::new(),
+            },
+            Message::FileChunk {
+                id: 7,
+                data: vec![0xAB; 1000],
+            },
+            Message::FileChunk {
+                id: 7,
+                data: Vec::new(),
+            },
+            Message::FileEnd {
+                id: 7,
+                sha256: [0x5A; 32],
+            },
+            Message::FileCancel {
+                id: 7,
+                by_sender: true,
+                reason: "changed my mind".into(),
+            },
         ]
     }
 
@@ -602,6 +799,10 @@ mod tests {
             vec![tag::INPUT, input_tag::MOUSE_BUTTON, 7, 1, 0, 0, 0, 0],
             vec![tag::INPUT, input_tag::KEY, 0x1E, 0, 0, 2],
             vec![tag::PERMISSIONS, 0x80],
+            vec![tag::PERMISSIONS, 0x08],
+            vec![tag::FILE_ANSWER, 0, 0, 0, 0, 2, 0],
+            vec![tag::FILE_CANCEL, 0, 0, 0, 0, 9, 0],
+            vec![tag::CLIPBOARD_TEXT, 2, 0, 0, 0, 0xFF, 0xFE],
             vec![tag::HELLO, 1, 0, 9],
             vec![tag::VIDEO_FRAME, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![tag::BYE, 2, 0, 0, 0, 0xFF, 0xFE],
@@ -678,6 +879,68 @@ mod tests {
         let mut decoder = MessageDecoder::default();
         decoder.push(&[0; 4]);
         assert!(matches!(decoder.next_message(), Err(ProtocolError::Empty)));
+    }
+
+    #[test]
+    fn permissions_bits_round_trip_for_every_combination() {
+        for bits in 0..8u8 {
+            let permissions = Permissions::from_bits(bits).unwrap();
+            assert_eq!(permissions.bits(), bits);
+        }
+        for bits in 8..=255u8 {
+            assert_eq!(Permissions::from_bits(bits), None, "{bits}");
+        }
+    }
+
+    #[test]
+    fn oversized_clipboard_text_names_and_chunks_are_refused_on_receipt_and_cut_on_send() {
+        // On the wire: lengths above the limits are rejected without
+        // allocating what they claim.
+        for (kind, limit) in [
+            (tag::CLIPBOARD_TEXT, MAX_CLIPBOARD_BYTES),
+            (tag::FILE_CHUNK, MAX_FILE_CHUNK_BYTES),
+        ] {
+            let mut body = vec![kind];
+            if kind == tag::FILE_CHUNK {
+                body.extend_from_slice(&[0, 0, 0, 0]);
+            }
+            body.extend_from_slice(&((limit + 1) as u32).to_le_bytes());
+            assert!(matches!(
+                Message::decode_body(&body),
+                Err(ProtocolError::Malformed(_))
+            ));
+        }
+        let mut offer = vec![tag::FILE_OFFER, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        offer.extend_from_slice(&((MAX_FILE_NAME_BYTES + 1) as u32).to_le_bytes());
+        assert!(Message::decode_body(&offer).is_err());
+
+        // When sending, over-long values are shortened rather than sent.
+        let big = "é".repeat(MAX_CLIPBOARD_BYTES);
+        let bytes = framed(&Message::ClipboardText(big));
+        match read_message(&mut bytes.as_slice()).unwrap() {
+            Message::ClipboardText(text) => {
+                assert!(text.len() <= MAX_CLIPBOARD_BYTES && text.chars().all(|c| c == 'é'));
+            }
+            other => panic!("{other:?}"),
+        }
+        let name = "ü".repeat(300);
+        let bytes = framed(&Message::FileOffer {
+            id: 1,
+            name,
+            size: 5,
+        });
+        match read_message(&mut bytes.as_slice()).unwrap() {
+            Message::FileOffer { name, .. } => assert!(name.len() <= MAX_FILE_NAME_BYTES),
+            other => panic!("{other:?}"),
+        }
+        let bytes = framed(&Message::FileChunk {
+            id: 1,
+            data: vec![1; MAX_FILE_CHUNK_BYTES + 100],
+        });
+        match read_message(&mut bytes.as_slice()).unwrap() {
+            Message::FileChunk { data, .. } => assert_eq!(data.len(), MAX_FILE_CHUNK_BYTES),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

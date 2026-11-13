@@ -138,11 +138,17 @@ fn to_packet(message: Message) -> Option<Vec<u8>> {
             Some(out)
         }
         Message::Bye { reason } => Some(ended(&reason)),
-        Message::Permissions(permissions) => {
-            Some(vec![packet::PERMISSIONS, u8::from(permissions.input)])
-        }
+        Message::Permissions(permissions) => Some(vec![packet::PERMISSIONS, permissions.bits()]),
         Message::Accepted => Some(vec![packet::ACCEPTED]),
-        Message::Hello { .. } | Message::KeyframeRequest | Message::Input(_) => None,
+        Message::Hello { .. }
+        | Message::KeyframeRequest
+        | Message::Input(_)
+        | Message::ClipboardText(_)
+        | Message::FileOffer { .. }
+        | Message::FileAnswer { .. }
+        | Message::FileChunk { .. }
+        | Message::FileEnd { .. }
+        | Message::FileCancel { .. } => None,
     }
 }
 

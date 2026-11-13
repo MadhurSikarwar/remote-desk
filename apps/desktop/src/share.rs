@@ -552,7 +552,10 @@ fn stream_frames(
             if !input {
                 lock(injector).release_all();
             }
-            writer.send(&Message::Permissions(Permissions { input }))?;
+            writer.send(&Message::Permissions(Permissions {
+                input,
+                ..Permissions::default()
+            }))?;
             announced = Some(input);
         }
 
