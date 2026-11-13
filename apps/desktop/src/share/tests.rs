@@ -392,6 +392,7 @@ fn shift_is_down() -> bool {
 }
 
 /// Reads from the host until it announces permissions.
+#[cfg(windows)]
 fn next_permissions(reader: &mut SecureReader, host: &ShareController) -> bool {
     loop {
         match reader.read_message() {
