@@ -8,7 +8,9 @@ runs in the background, and closing the window ends sharing.
 ## Install
 
 Run `Remote Control_<version>_x64-setup.exe`. It installs **for your user
-only**, needs no administrator rights, and puts a shortcut in the Start menu.
+only**, needs no administrator rights, installs into
+`%LOCALAPPDATA%\Remote Control`, and adds a shortcut in the Start menu and
+one on the Desktop (delete either freely).
 It does not set the app to start with Windows, and does not install a
 service. If Windows' WebView2 component is missing (it is part of current
 Windows 10 and 11) the installer downloads it from Microsoft.
@@ -23,7 +25,11 @@ project does not ask you to. See `docs/RELEASING.md` for why it is unsigned.
 To uninstall: Settings → Apps → Remote Control, or run the uninstaller in the
 install folder. Your settings and keys stay (see "Where things are") so that
 reinstalling keeps the same device identity; delete the folders to remove
-them.
+them. The web view the window runs in also keeps its own data in
+`%LOCALAPPDATA%\dev.remotedesk.desktop`. A silent test uninstall on a clean
+machine removed the program, its uninstall entry and both shortcuts, and
+left exactly three folders: `%APPDATA%\RemoteControl`,
+`%LOCALAPPDATA%\RemoteControl` and `%LOCALAPPDATA%\dev.remotedesk.desktop`.
 
 ## The two halves
 
