@@ -148,6 +148,7 @@ fn to_packet(message: Message) -> Option<Vec<u8>> {
         | Message::FileAnswer { .. }
         | Message::FileChunk { .. }
         | Message::FileEnd { .. }
+        | Message::FileDone { .. }
         | Message::FileCancel { .. } => None,
     }
 }

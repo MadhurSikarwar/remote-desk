@@ -173,6 +173,9 @@ pub enum Message {
     FileChunk { id: u32, data: Vec<u8> },
     /// The whole file has been sent; `sha256` is the hash of its bytes.
     FileEnd { id: u32, sha256: [u8; 32] },
+    /// The receiver has the whole file and its hash matched. Last message
+    /// of a successful transfer.
+    FileDone { id: u32 },
     /// Either side stops a transfer. `by_sender` says whose transfer
     /// numbering `id` belongs to.
     FileCancel {
@@ -211,6 +214,7 @@ mod tag {
     pub const FILE_CHUNK: u8 = 12;
     pub const FILE_END: u8 = 13;
     pub const FILE_CANCEL: u8 = 14;
+    pub const FILE_DONE: u8 = 15;
 }
 
 mod input_tag {
@@ -465,6 +469,10 @@ impl Message {
                 out.extend_from_slice(&id.to_le_bytes());
                 out.extend_from_slice(sha256);
             }
+            Self::FileDone { id } => {
+                out.push(tag::FILE_DONE);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
             Self::FileCancel {
                 id,
                 by_sender,
@@ -538,6 +546,7 @@ impl Message {
                 id: r.u32()?,
                 sha256: r.array()?,
             },
+            tag::FILE_DONE => Self::FileDone { id: r.u32()? },
             tag::FILE_CANCEL => Self::FileCancel {
                 id: r.u32()?,
                 by_sender: r.bool()?,
@@ -706,6 +715,7 @@ mod tests {
                 id: 7,
                 sha256: [0x5A; 32],
             },
+            Message::FileDone { id: 7 },
             Message::FileCancel {
                 id: 7,
                 by_sender: true,
