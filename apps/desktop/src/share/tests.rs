@@ -1,4 +1,4 @@
-use super::test_support::{knock, pending, settings, wait_until};
+use super::test_support::{knock, knock_at, pending, settings, wait_until};
 use super::*;
 use crate::secure::test_support::{desktop, security};
 use crate::secure::SecureReader;
@@ -435,8 +435,6 @@ fn input_works_only_while_the_host_allows_it() {
     unsafe {
         windows::Win32::UI::WindowsAndMessaging::SetCursorPos(centre.0 / 2, centre.1 / 2).unwrap();
     }
-    let parked = pointer();
-
     // 0. Before approval, input is not even looked at.
     writer.send(&to_centre).unwrap();
     thread::sleep(Duration::from_millis(100));
@@ -479,13 +477,18 @@ fn input_works_only_while_the_host_allows_it() {
         windows::Win32::UI::WindowsAndMessaging::SetCursorPos(original.0, original.1).unwrap();
     }
 
-    assert_eq!(
-        before_approval,
-        (parked, 0),
-        "input acted on before approval"
-    );
-    assert_eq!(while_off, (parked, false, 0), "input acted on while off");
+    // "Did not act" is judged by the pointer not having reached the target,
+    // not by an exact position: a person using the mouse during the test
+    // would otherwise make it fail.
     let near = |a: (i32, i32), b: (i32, i32)| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1;
+    assert!(
+        !near(before_approval.0, centre) && before_approval.1 == 0,
+        "input acted on before approval: {before_approval:?}"
+    );
+    assert!(
+        !near(while_off.0, centre) && !while_off.1 && while_off.2 == 0,
+        "input acted on while off: {while_off:?}"
+    );
     assert!(near(while_on.0, centre), "pointer at {:?}", while_on.0);
     assert!(while_on.1, "Shift did not register while control was on");
     assert!(
@@ -496,4 +499,191 @@ fn input_works_only_while_the_host_allows_it() {
         near(after_revoke, centre),
         "pointer moved after control was withdrawn"
     );
+}
+
+fn remote_settings() -> ShareSettings {
+    ShareSettings {
+        allow_remote: true,
+        lan_discovery: true,
+        ..settings()
+    }
+}
+
+#[test]
+#[ignore = "needs an interactive desktop with a monitor"]
+fn a_second_viewer_is_told_the_host_is_busy_and_the_first_is_unaffected() {
+    let _desktop = desktop();
+    let (host_keys, _dir) = security();
+    let (first_keys, _d1) = security();
+    let (second_keys, _d2) = security();
+    let host = ShareController::new(Some(host_keys));
+    let port = host.start(settings()).unwrap().port.unwrap();
+
+    let _first = knock(port, &first_keys, "First");
+    let request = pending(&host);
+    let (_writer, mut reader, _) = knock(port, &second_keys, "Second");
+    assert_eq!(
+        goodbye_without_video(&mut reader),
+        "the host is busy with another viewer"
+    );
+    // The first is still waiting, and its request is the one shown.
+    assert_eq!(host.status().pending.unwrap().id, request.id);
+    host.stop();
+}
+
+#[test]
+#[ignore = "needs an interactive desktop with a monitor"]
+fn after_a_refusal_the_next_viewer_is_asked_to_wait_briefly() {
+    let _desktop = desktop();
+    let (host_keys, _dir) = security();
+    let (a_keys, _d1) = security();
+    let (b_keys, _d2) = security();
+    let host = ShareController::new(Some(host_keys));
+    let port = host.start(settings()).unwrap().port.unwrap();
+
+    let (_writer, mut reader, _) = knock(port, &a_keys, "A");
+    host.answer(pending(&host).id, false, false).unwrap();
+    assert_eq!(
+        goodbye_without_video(&mut reader),
+        "the host declined the request"
+    );
+
+    let (_writer, mut reader, _) = knock(port, &b_keys, "B");
+    assert_eq!(goodbye_without_video(&mut reader), "try again in a moment");
+    assert!(host.status().pending.is_none());
+
+    // Once the gap has passed a viewer is asked about again.
+    thread::sleep(REFUSAL_GAP + Duration::from_millis(300));
+    let _knock = knock(port, &b_keys, "B");
+    assert_eq!(pending(&host).name, "B");
+    host.stop();
+}
+
+#[test]
+#[ignore = "needs an interactive desktop with a monitor"]
+fn a_stalled_connection_does_not_hold_up_a_real_viewer() {
+    let _desktop = desktop();
+    let (host_keys, _dir) = security();
+    let (viewer_keys, _d1) = security();
+    let host = ShareController::new(Some(host_keys));
+    let port = host.start(settings()).unwrap().port.unwrap();
+
+    // Connects and says nothing.
+    let _silent = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let before = Instant::now();
+    let _knock = knock(port, &viewer_keys, "Real");
+    assert_eq!(pending(&host).name, "Real");
+    let took = before.elapsed();
+    assert!(took < Duration::from_secs(2), "took {took:?}");
+    host.stop();
+}
+
+#[test]
+#[ignore = "needs an interactive desktop with a monitor"]
+fn too_many_simultaneous_connections_are_refused_and_recovery_follows() {
+    let _desktop = desktop();
+    let (host_keys, _dir) = security();
+    let (viewer_keys, _d1) = security();
+    let host = ShareController::new(Some(host_keys));
+    let port = host.start(settings()).unwrap().port.unwrap();
+
+    let silent: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap())
+        .collect();
+    // Let the host take them all.
+    thread::sleep(Duration::from_millis(300));
+    let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+    let refused = establish(&stream, viewer_keys.identity(), Side::Initiator);
+    assert!(
+        refused.is_err(),
+        "the host took more connections than its limit"
+    );
+
+    // The silent ones give up; then a viewer gets through again.
+    drop(silent);
+    wait_until("the host to recover", || {
+        TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .ok()
+            .and_then(|s| establish(&s, viewer_keys.identity(), Side::Initiator).ok())
+            .is_some()
+    });
+    host.stop();
+}
+
+#[test]
+#[ignore = "needs an interactive desktop with a monitor"]
+fn other_computers_can_connect_only_when_the_user_has_allowed_it() {
+    let _desktop = desktop();
+    let Some(lan) = rc_net::local_address() else {
+        eprintln!("no network address on this computer; test skipped");
+        return;
+    };
+    let (host_keys, _dir) = security();
+    let (viewer_keys, _d1) = security();
+    let host = ShareController::new(Some(host_keys));
+
+    // Default: reachable on loopback only, so the LAN address refuses.
+    let port = host.start(settings()).unwrap().port.unwrap();
+    let status = host.status();
+    assert!(!status.remote && status.lan_address.is_none());
+    let lan_address = std::net::SocketAddr::new(lan, port);
+    assert!(TcpStream::connect_timeout(&lan_address, Duration::from_secs(1)).is_err());
+    host.stop();
+
+    // Allowed: reachable at the LAN address, and still asks.
+    let port = host.start(remote_settings()).unwrap().port.unwrap();
+    let status = host.status();
+    assert!(status.remote);
+    assert_eq!(status.lan_address, Some(lan.to_string()));
+    let _knock = knock_at(std::net::SocketAddr::new(lan, port), &viewer_keys, "Remote");
+    let request = pending(&host);
+    assert_eq!(request.name, "Remote");
+    assert!(!host.status().viewer_connected);
+    host.stop();
+}
+
+#[test]
+#[ignore = "needs an interactive desktop with a monitor"]
+fn a_sharing_device_is_discoverable_only_while_it_allows_it() {
+    let _desktop = desktop();
+    let (host_keys, _dir) = security();
+    let key = *host_keys.identity().public();
+    let host = ShareController::new(Some(host_keys));
+    let find = || {
+        rc_net::scan(Duration::from_millis(700))
+            .unwrap()
+            .into_iter()
+            .find(|found| found.announcement.public_key == key)
+    };
+
+    // Not remote: no discovery, even though it is sharing.
+    host.start(settings()).unwrap();
+    assert!(!host.status().discoverable);
+    assert!(find().is_none());
+    host.stop();
+
+    // Remote, but discovery off.
+    host.start(ShareSettings {
+        lan_discovery: false,
+        ..remote_settings()
+    })
+    .unwrap();
+    assert!(!host.status().discoverable);
+    assert!(find().is_none());
+    host.stop();
+
+    // Remote with discovery: found, with the right port and name.
+    let port = host.start(remote_settings()).unwrap().port.unwrap();
+    assert!(host.status().discoverable);
+    let found = find().expect("a sharing device was not found");
+    assert_eq!(found.announcement.port, port);
+    assert_eq!(found.announcement.name, "Test host");
+    assert_eq!(
+        found.announcement.protocol_version,
+        rc_protocol::PROTOCOL_VERSION
+    );
+
+    // Gone as soon as sharing stops.
+    host.stop();
+    assert!(find().is_none());
 }
