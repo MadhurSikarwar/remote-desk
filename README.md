@@ -266,7 +266,7 @@ cargo test --workspace --locked             # what CI runs
 cargo test --workspace --locked -- --include-ignored   # also the tests that need a real desktop
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-node --test apps/desktop/ui/reconnect.test.js
+node --test apps/desktop/ui/reconnect.test.js apps/desktop/ui-tests/*.test.js
 ```
 
 The compiler is pinned (`rust-toolchain.toml`). The installer:

@@ -473,6 +473,30 @@
     heldKeys.clear();
   }
 
+  // Mouse buttons held down on the picture, and where the pointer last was.
+  // The shared computer keeps a button down until it is told to let go, so
+  // every way a press can end without a pointerup has to release it: looking
+  // away, switching control off, and the browser cancelling the press.
+  const heldButtons = new Set();
+  let lastPointer = { x: 0, y: 0 };
+
+  function releaseHeldButtons() {
+    for (const button of heldButtons) send({ kind: "button", button, down: false, ...lastPointer });
+    heldButtons.clear();
+  }
+
+  function releaseHeldInput() {
+    releaseHeldKeys();
+    releaseHeldButtons();
+  }
+
+  // Nothing held in a session that has ended is let go of in the next one;
+  // the shared computer lets go of everything itself when a session ends.
+  function forgetHeldInput() {
+    heldKeys.clear();
+    heldButtons.clear();
+  }
+
   function showControl() {
     viewControl.disabled = !(viewing && hostAllowsControl);
     if (viewControl.disabled) viewControl.checked = false;
@@ -480,7 +504,7 @@
       ? "Control the shared screen"
       : "Control the shared screen (the host has not allowed it)";
     canvas.classList.toggle("controlling", controlling());
-    if (!controlling()) releaseHeldKeys();
+    if (!controlling()) releaseHeldInput();
   }
 
   function setHostAllowsControl(allowed) {
@@ -498,6 +522,7 @@
     // Pointer events can arrive far faster than frames; send one per frame.
     const first = pendingMove === null;
     pendingMove = position(event);
+    lastPointer = pendingMove;
     if (first) {
       requestAnimationFrame(() => {
         if (controlling()) send({ kind: "move", ...pendingMove });
@@ -506,18 +531,31 @@
     }
   });
 
-  for (const [type, down] of [["pointerdown", true], ["pointerup", false]]) {
-    canvas.addEventListener(type, (event) => {
-      if (!controlling()) return;
-      event.preventDefault();
-      if (down) {
-        canvas.focus();
-        // Keeps the drag alive outside the picture; not essential.
-        try { canvas.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-      }
-      send({ kind: "button", button: event.button, down, ...position(event) });
-    });
-  }
+  canvas.addEventListener("pointerdown", (event) => {
+    if (!controlling()) return;
+    event.preventDefault();
+    canvas.focus();
+    // Keeps the drag alive outside the picture; not essential.
+    try { canvas.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+    lastPointer = position(event);
+    heldButtons.add(event.button);
+    send({ kind: "button", button: event.button, down: true, ...lastPointer });
+  });
+
+  canvas.addEventListener("pointerup", (event) => {
+    // Only a press that is still down. If control was switched off meanwhile
+    // the button was let go of then, and this adds nothing.
+    if (!heldButtons.has(event.button)) return;
+    event.preventDefault();
+    lastPointer = position(event);
+    heldButtons.delete(event.button);
+    send({ kind: "button", button: event.button, down: false, ...lastPointer });
+  });
+
+  // A press the browser takes away (touch or pen gestures, a lost capture)
+  // never ends in a pointerup. After a normal release these find nothing held.
+  canvas.addEventListener("pointercancel", releaseHeldButtons);
+  canvas.addEventListener("lostpointercapture", releaseHeldButtons);
 
   canvas.addEventListener("wheel", (event) => {
     if (!controlling()) return;
@@ -540,8 +578,8 @@
     });
   }
 
-  // Keys must not stay down on the host when the viewer looks away.
-  canvas.addEventListener("blur", releaseHeldKeys);
+  // Keys and buttons must not stay down on the host when the viewer looks away.
+  canvas.addEventListener("blur", releaseHeldInput);
 
   // ---- Viewer: clipboard and files -----------------------------------------
 
@@ -603,6 +641,7 @@
   function endViewing(reason) {
     if (!viewing) return;
     viewing = false;
+    forgetHeldInput();
     linkNote = "";
     clearInterval(statsTimer);
     statsTimer = null;
@@ -662,6 +701,7 @@
 
   // Connects, and shows who answered. Throws if the connection cannot be made.
   async function connectNow(address) {
+    forgetHeldInput();
     Object.keys(totals).forEach((key) => { totals[key] = 0; });
     lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
 
