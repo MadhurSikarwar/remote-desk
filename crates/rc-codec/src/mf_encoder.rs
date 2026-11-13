@@ -93,6 +93,9 @@ pub struct H264Encoder {
     codec_api: ICodecAPI,
     transform: IMFTransform,
     config: EncoderConfig,
+    /// The bit rate in force now, which `set_bitrate_kbps` may have changed
+    /// from the one in `config`.
+    bitrate_kbps: u32,
     frame_duration_100ns: i64,
     _runtime: Runtime,
 }
@@ -179,6 +182,7 @@ impl H264Encoder {
                 codec_api,
                 transform,
                 config,
+                bitrate_kbps: config.bitrate_kbps,
                 frame_duration_100ns: 10_000_000 / i64::from(config.fps),
                 _runtime: runtime,
             })
@@ -187,6 +191,31 @@ impl H264Encoder {
 
     pub fn config(&self) -> EncoderConfig {
         self.config
+    }
+
+    /// The bit rate being aimed for now, in kilobits per second.
+    pub fn bitrate_kbps(&self) -> u32 {
+        self.bitrate_kbps
+    }
+
+    /// Changes the bit rate to aim for, while encoding. The encoder applies
+    /// it from a following frame and carries on; no keyframe is needed. This
+    /// does not change [`config`](Self::config), which stays what the
+    /// encoder was created with.
+    pub fn set_bitrate_kbps(&mut self, kbps: u32) -> Result<(), CodecError> {
+        if kbps == 0 {
+            return Err(CodecError::InvalidConfig("bitrate must be non-zero"));
+        }
+        // SAFETY: `codec_api` is owned by `self` and alive.
+        unsafe {
+            set_property(
+                &self.codec_api,
+                &CODECAPI_AVEncCommonMeanBitRate,
+                VARIANT::from(kbps.saturating_mul(1000)),
+            )?;
+        }
+        self.bitrate_kbps = kbps;
+        Ok(())
     }
 
     /// Makes the next encoded frame a keyframe, for a viewer that just

@@ -127,3 +127,66 @@ fn a_requested_keyframe_arrives_on_the_next_frame() {
     assert!(frames[0].keyframe);
     assert!(nal_types(&frames[0].data).contains(&5));
 }
+
+/// Frames of noise: the most the encoder can be asked to compress, so the
+/// bit rate it is told to aim for decides the size.
+fn noise_frame(index: usize) -> Vec<u8> {
+    let mut state = 0x9E37_79B9u32.wrapping_add(index as u32 * 7919);
+    let mut bgra = vec![255u8; WIDTH * HEIGHT * 4];
+    for px in bgra.as_chunks_mut::<4>().0 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        px[0] = (state >> 8) as u8;
+        px[1] = (state >> 16) as u8;
+        px[2] = (state >> 24) as u8;
+    }
+    let mut nv12 = vec![0u8; nv12_len(WIDTH, HEIGHT)];
+    bgra_to_nv12(&bgra, WIDTH * 4, WIDTH, HEIGHT, &mut nv12);
+    nv12
+}
+
+fn bytes_for(encoder: &mut H264Encoder, range: std::ops::Range<usize>) -> usize {
+    range
+        .flat_map(|i| {
+            encoder
+                .encode(&noise_frame(i), i as u64 * 33_333)
+                .expect("encode")
+        })
+        .map(|f| f.data.len())
+        .sum()
+}
+
+#[test]
+fn the_bit_rate_can_be_changed_while_encoding() {
+    let mut encoder = H264Encoder::new(EncoderConfig {
+        bitrate_kbps: 4000,
+        ..config()
+    })
+    .unwrap();
+    assert_eq!(encoder.bitrate_kbps(), 4000);
+    let high = bytes_for(&mut encoder, 0..60);
+
+    encoder.set_bitrate_kbps(300).unwrap();
+    assert_eq!(encoder.bitrate_kbps(), 300);
+    assert_eq!(
+        encoder.config().bitrate_kbps,
+        4000,
+        "config is what it was created with"
+    );
+    // Give the rate control a moment to settle, then measure.
+    bytes_for(&mut encoder, 60..90);
+    let low = bytes_for(&mut encoder, 90..150);
+    eprintln!("60 frames of noise: {high} bytes at 4000 kbps, {low} at 300 kbps");
+    assert!(
+        low * 3 < high,
+        "300 kbps produced {low} bytes against {high} at 4000 kbps"
+    );
+
+    encoder.set_bitrate_kbps(4000).unwrap();
+    bytes_for(&mut encoder, 150..180);
+    let again = bytes_for(&mut encoder, 180..240);
+    assert!(again > low * 3, "going back up produced {again} bytes");
+    assert!(matches!(
+        encoder.set_bitrate_kbps(0),
+        Err(CodecError::InvalidConfig(_))
+    ));
+}
