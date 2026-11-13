@@ -39,6 +39,7 @@ use rc_protocol::{InputEvent, Message, Permissions, Role, PROTOCOL_VERSION};
 use serde::Serialize;
 
 use crate::capabilities::Capabilities;
+use crate::link::{Link, LinkStats, LinkTiming, Monitor};
 use crate::rendezvous::{keep_registered, Registration, ServerLink};
 pub use crate::secure::lock;
 use crate::secure::{establish, exchange_hello, Peer, SecureReader, SecureWriter, Security};
@@ -91,6 +92,8 @@ pub struct ShareSettings {
     pub device_name: String,
     /// How long an approval prompt waits before the answer is "no".
     pub approval_timeout: Duration,
+    /// How often to ping the viewer and how long silence may last.
+    pub link: LinkTiming,
 }
 
 /// A viewer waiting for the person at this computer to decide.
@@ -146,6 +149,8 @@ struct Shared {
     files_allowed: AtomicBool,
     /// The running session's clipboard and file transfers, if any.
     capabilities: Mutex<Option<Arc<Capabilities>>>,
+    /// Liveness and round-trip time of the running session, if any.
+    link: Mutex<Option<Arc<Link>>>,
     /// Input events acted on, and events ignored because input was off.
     input_events: AtomicU64,
     input_ignored: AtomicU64,
@@ -185,6 +190,7 @@ impl Shared {
                 ..a.request.clone()
             });
         let capabilities = lock(&self.capabilities).clone();
+        let link = lock(&self.link).clone();
         ShareStatus {
             active,
             port: Some(port),
@@ -205,6 +211,7 @@ impl Shared {
                 .as_ref()
                 .filter(|_| active)
                 .map(|c| c.transfers.status()),
+            link: link.filter(|_| active).map(|l| l.stats()),
             input_events: self.input_events.load(Ordering::Relaxed),
             input_ignored: self.input_ignored.load(Ordering::Relaxed),
             pending,
@@ -295,6 +302,9 @@ pub struct ShareStatus {
     pub clipboard_received: u64,
     /// The current session's file transfers, while one is running.
     pub transfers: Option<TransferStatus>,
+    /// Round-trip time and liveness of the connection, while a viewer is
+    /// connected.
+    pub link: Option<LinkStats>,
     /// Input events from the viewer that were carried out.
     pub input_events: u64,
     /// Input events discarded because control was not allowed.
@@ -485,6 +495,12 @@ fn run_session(
         settings.clipboard.clone(),
     ));
     *lock(&shared.capabilities) = Some(Arc::clone(&capabilities));
+    // From the moment the viewer is allowed: ping it, and give up on it if it
+    // goes quiet. Dropped (and so stopped) when this function returns.
+    let monitor = Monitor::start(Arc::clone(&writer), settings.link)?;
+    let link = monitor.link();
+    link.arm();
+    *lock(&shared.link) = Some(Arc::clone(&link));
 
     let display = rc_capture::list_displays()
         .map_err(|e| e.to_string())?
@@ -510,6 +526,7 @@ fn run_session(
         let keyframe_wanted = Arc::clone(&keyframe_wanted);
         let injector = Arc::clone(&injector);
         let capabilities = Arc::clone(&capabilities);
+        let link = Arc::clone(&link);
         let counters = Arc::clone(shared);
         // The permission is checked for every single event, under the same
         // lock the revocation takes, so nothing is injected after "off".
@@ -525,6 +542,8 @@ fn run_session(
             .name("share-reader".into())
             .spawn(move || {
                 let _ = reader.poll(&finished, |message| match message {
+                    // Pings and pongs, and any sign of life.
+                    message if link.handle(&message) => ControlFlow::Continue(()),
                     Message::KeyframeRequest => {
                         keyframe_wanted.store(true, Ordering::Relaxed);
                         ControlFlow::Continue(())
@@ -559,7 +578,23 @@ fn run_session(
     lock(&injector).release_all();
     capabilities.end();
     *lock(&shared.capabilities) = None;
+    *lock(&shared.link) = None;
 
+    // A viewer that went quiet is reported as such, not as whatever write
+    // error closing its connection caused.
+    let silent = link.lost_reason();
+    let stats = link.stats();
+    tracing::info!(
+        rtt_avg_ms = stats.rtt_avg_ms,
+        pings = stats.pings_sent,
+        pongs = stats.pongs_received,
+        silent = silent.is_some(),
+        "session link summary"
+    );
+    let result = match silent {
+        Some(_) => Ok("the viewer stopped responding"),
+        None => result,
+    };
     let reason = match &result {
         Ok(reason) => (*reason).to_owned(),
         Err(e) => e.clone(),
@@ -1073,6 +1108,7 @@ impl ShareController {
                 clipboard_sent: 0,
                 clipboard_received: 0,
                 transfers: None,
+                link: None,
                 input_events: 0,
                 input_ignored: 0,
                 pending: None,
@@ -1107,6 +1143,7 @@ pub mod test_support {
             advertised_port: None,
             device_name: "Test host".to_owned(),
             approval_timeout: Duration::from_secs(10),
+            link: LinkTiming::default(),
         }
     }
 
@@ -1146,5 +1183,7 @@ pub mod test_support {
 
 #[cfg(test)]
 mod capability_tests;
+#[cfg(test)]
+mod link_tests;
 #[cfg(test)]
 mod tests;

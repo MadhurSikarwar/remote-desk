@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::transfer::TransferStatus;
 
 use crate::capabilities::Capabilities;
+use crate::link::{Link, LinkStats, LinkTiming, Monitor};
 use crate::rendezvous::{reach, Route, ServerLink};
 use crate::secure::{establish, exchange_hello, lock, Peer, SecureReader, SecureWriter, Security};
 
@@ -36,7 +37,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// - `CONFIG`: u32 width, u32 height, u32 fps
 /// - `FRAME`: u8 keyframe, u64 capture time (µs since the Unix epoch), then
 ///   the H.264 access unit
-/// - `ENDED`: UTF-8 reason
+/// - `ENDED`: UTF-8 reason; the session was ended on purpose (by either
+///   side), so the window must not try to reconnect
+/// - `LOST`: UTF-8 reason; the connection broke without an orderly goodbye,
+///   so the window may offer or attempt to reconnect
 /// - `PERMISSIONS`: u8 flags, bit 0 = the viewer may control input
 /// - `ACCEPTED`: nothing; the host allowed the session
 pub mod packet {
@@ -45,6 +49,7 @@ pub mod packet {
     pub const FRAME: u8 = 2;
     pub const ENDED: u8 = 3;
     pub const PERMISSIONS: u8 = 4;
+    pub const LOST: u8 = 6;
 }
 
 /// Mouse or keyboard input as the window reports it.
@@ -119,6 +124,12 @@ fn ended(reason: &str) -> Vec<u8> {
     out
 }
 
+fn lost(reason: &str) -> Vec<u8> {
+    let mut out = vec![packet::LOST];
+    out.extend_from_slice(reason.as_bytes());
+    out
+}
+
 /// Converts a message from the host into a packet for the window. `None`
 /// for messages the window does not need.
 fn to_packet(message: Message) -> Option<Vec<u8>> {
@@ -154,7 +165,9 @@ fn to_packet(message: Message) -> Option<Vec<u8>> {
         | Message::FileChunk { .. }
         | Message::FileEnd { .. }
         | Message::FileDone { .. }
-        | Message::FileCancel { .. } => None,
+        | Message::FileCancel { .. }
+        | Message::Ping { .. }
+        | Message::Pong { .. } => None,
     }
 }
 
@@ -224,6 +237,8 @@ pub struct ConnectOptions {
     pub received_folder: PathBuf,
     /// Replaces the system clipboard; for tests.
     pub clipboard: Option<MemoryClipboard>,
+    /// How often to ping the host and how long silence may last.
+    pub link: LinkTiming,
 }
 
 impl Default for ConnectOptions {
@@ -234,6 +249,7 @@ impl Default for ConnectOptions {
             policy: TransportPolicy::Auto,
             received_folder: std::env::temp_dir().join("rc-test-received"),
             clipboard: None,
+            link: LinkTiming::default(),
         }
     }
 }
@@ -269,6 +285,7 @@ pub struct ViewerStatus {
     pub clipboard_sent: u64,
     pub clipboard_received: u64,
     pub transfers: TransferStatus,
+    pub link: LinkStats,
 }
 
 /// What the user asked to connect to.
@@ -334,6 +351,7 @@ fn handshake_checked(
 }
 
 struct Connection {
+    link: Arc<Link>,
     capabilities: Arc<Capabilities>,
     clipboard: Arc<ClipboardSwitches>,
     writer: Arc<SecureWriter>,
@@ -455,22 +473,33 @@ impl ViewerController {
             options.clipboard.clone(),
         ));
         let clipboard = Arc::new(ClipboardSwitches::default());
+        // Starts pinging once the host has said yes.
+        let monitor = Monitor::start(Arc::clone(&writer), options.link)?;
+        let link = monitor.link();
         let closing = Arc::new(AtomicBool::new(false));
         let thread = {
             let writer = Arc::clone(&writer);
             let closing = Arc::clone(&closing);
             let capabilities = Arc::clone(&capabilities);
             let clipboard = Arc::clone(&clipboard);
+            let link = Arc::clone(&link);
             thread::Builder::new()
                 .name("viewer".into())
                 .spawn(move || {
+                    // Stops the pings when this thread ends.
+                    let _monitor = monitor;
                     let mut goodbye = None;
                     let outcome = reader.poll(&closing, |message| match message {
+                        // Pings and pongs, and any sign of life.
+                        message if link.handle(&message) => ControlFlow::Continue(()),
                         Message::Bye { reason } => {
                             goodbye = Some(reason);
                             ControlFlow::Break(())
                         }
                         message => {
+                            if matches!(message, Message::Accepted) {
+                                link.arm();
+                            }
                             // What the host allows decides what this end may
                             // do; then clipboard and file messages are dealt
                             // with here and the rest go to the window.
@@ -490,16 +519,31 @@ impl ViewerController {
                         }
                     });
                     capabilities.end();
-                    let reason = match (goodbye, outcome) {
-                        (Some(reason), _) => reason,
-                        _ if closing.load(Ordering::Relaxed) => "disconnected".to_owned(),
-                        (None, Ok(())) => "the host closed the connection".to_owned(),
-                        (None, Err(e)) => format!("connection lost: {e}"),
+                    // An orderly goodbye or our own disconnect ends the
+                    // session for good; anything else is a lost connection.
+                    let (reason, orderly) = match (goodbye, outcome, link.lost_reason()) {
+                        (Some(reason), _, _) => (reason, true),
+                        _ if closing.load(Ordering::Relaxed) => ("disconnected".to_owned(), true),
+                        (None, _, Some(why)) => (format!("connection lost: {why}"), false),
+                        (None, Ok(()), None) => ("the host closed the connection".to_owned(), true),
+                        (None, Err(e), None) => (format!("connection lost: {e}"), false),
                     };
+                    let stats = link.stats();
                     // Close our side so the host is not left waiting on it.
                     writer.shutdown();
-                    tracing::info!(reason, "viewing ended");
-                    sink(ended(&reason));
+                    tracing::info!(
+                        reason,
+                        orderly,
+                        rtt_avg_ms = stats.rtt_avg_ms,
+                        pings = stats.pings_sent,
+                        pongs = stats.pongs_received,
+                        "viewing ended"
+                    );
+                    sink(if orderly {
+                        ended(&reason)
+                    } else {
+                        lost(&reason)
+                    });
                 })
                 .map_err(|e| e.to_string())?
         };
@@ -512,6 +556,7 @@ impl ViewerController {
             "connected; waiting for the host to allow viewing"
         );
         *slot = Some(Connection {
+            link,
             capabilities,
             clipboard,
             writer,
@@ -556,6 +601,7 @@ impl ViewerController {
             clipboard_sent: sent,
             clipboard_received: received,
             transfers: capabilities.transfers.status(),
+            link: connection.link.stats(),
         })
     }
 

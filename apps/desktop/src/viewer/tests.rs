@@ -375,3 +375,133 @@ fn a_viewer_receives_the_shared_screen_once_approved() {
     assert!(host.status().active);
     host.stop();
 }
+
+fn quick_link() -> ConnectOptions {
+    ConnectOptions {
+        link: LinkTiming {
+            ping_every: Duration::from_millis(50),
+            timeout: Duration::from_millis(500),
+        },
+        ..ConnectOptions::default()
+    }
+}
+
+#[test]
+fn a_host_that_goes_silent_after_allowing_is_reported_as_a_lost_connection() {
+    let (port, _keys, host_side, _dir) = fake_host(|writer| {
+        writer.send(&Message::Accepted).unwrap();
+    });
+    let (viewer, sink, rx, _dir2) = collecting_viewer();
+    viewer
+        .connect_with(&addr(port), &quick_link(), "Me", sink)
+        .unwrap();
+    // Held open, but it never answers a ping.
+    let _host = host_side.recv_timeout(WAIT).unwrap();
+
+    assert_eq!(rx.recv_timeout(WAIT).unwrap(), [packet::ACCEPTED]);
+    let last = rx.iter().last().expect("no final packet");
+    assert_eq!(
+        last[0],
+        packet::LOST,
+        "{:?}",
+        String::from_utf8_lossy(&last)
+    );
+    let reason = String::from_utf8_lossy(&last[1..]).into_owned();
+    assert!(reason.contains("no answer"), "{reason}");
+    viewer.disconnect();
+}
+
+#[test]
+fn a_host_that_vanishes_without_a_goodbye_is_lost_not_ended() {
+    let (port, _keys, host_side, _dir) = fake_host(|writer| {
+        writer.send(&Message::Accepted).unwrap();
+    });
+    let (viewer, sink, rx, _dir2) = collecting_viewer();
+    viewer
+        .connect_with(&addr(port), &quick_link(), "Me", sink)
+        .unwrap();
+    let host = host_side.recv_timeout(WAIT).unwrap();
+    assert_eq!(rx.recv_timeout(WAIT).unwrap(), [packet::ACCEPTED]);
+    drop(host);
+
+    let last = rx.iter().last().expect("no final packet");
+    assert_eq!(
+        last[0],
+        packet::LOST,
+        "{:?}",
+        String::from_utf8_lossy(&last)
+    );
+    viewer.disconnect();
+}
+
+#[test]
+fn a_goodbye_from_the_host_is_an_ordinary_end() {
+    let (port, _keys, host_side, _dir) = fake_host(|writer| {
+        writer.send(&Message::Accepted).unwrap();
+    });
+    let (viewer, sink, rx, _dir2) = collecting_viewer();
+    viewer
+        .connect_with(&addr(port), &quick_link(), "Me", sink)
+        .unwrap();
+    let (writer, _reader) = host_side.recv_timeout(WAIT).unwrap();
+    assert_eq!(rx.recv_timeout(WAIT).unwrap(), [packet::ACCEPTED]);
+    writer
+        .send(&Message::Bye {
+            reason: "sharing stopped".into(),
+        })
+        .unwrap();
+    assert_eq!(rx.iter().last().unwrap(), ended("sharing stopped"));
+    viewer.disconnect();
+}
+
+#[test]
+fn waiting_for_the_host_to_decide_is_not_a_timeout() {
+    let (port, _keys, host_side, _dir) = fake_host(|_| {});
+    let (viewer, sink, rx, _dir2) = collecting_viewer();
+    viewer
+        .connect_with(&addr(port), &quick_link(), "Me", sink)
+        .unwrap();
+    let _host = host_side.recv_timeout(WAIT).unwrap();
+
+    // Several times the timeout, and still nothing has gone wrong.
+    thread::sleep(Duration::from_millis(1500));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(viewer.status().unwrap().link.pings_sent, 0);
+    viewer.disconnect();
+}
+
+#[test]
+fn a_host_that_answers_pings_keeps_a_still_session_alive() {
+    let (port, _keys, host_side, _dir) = fake_host(|writer| {
+        writer.send(&Message::Accepted).unwrap();
+    });
+    let (viewer, sink, rx, _dir2) = collecting_viewer();
+    viewer
+        .connect_with(&addr(port), &quick_link(), "Me", sink)
+        .unwrap();
+    let (writer, mut reader) = host_side.recv_timeout(WAIT).unwrap();
+    assert_eq!(rx.recv_timeout(WAIT).unwrap(), [packet::ACCEPTED]);
+    // A host with a still screen: no video, only answers to pings.
+    let stop = Arc::new(AtomicBool::new(false));
+    let answering = {
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let _ = reader.poll(&stop, |message| {
+                if let Message::Ping { nonce } = message {
+                    let _ = writer.send(&Message::Pong { nonce });
+                }
+                ControlFlow::Continue(())
+            });
+        })
+    };
+
+    // Three times the timeout.
+    thread::sleep(Duration::from_millis(1600));
+    let link = viewer.status().expect("the session ended").link;
+    assert!(link.pongs_received >= 5, "{link:?}");
+    assert!(link.rtt_ms.unwrap() < 500.0);
+    assert!(rx.try_recv().is_err(), "the session was ended");
+    stop.store(true, Ordering::Relaxed);
+    viewer.disconnect();
+    answering.join().unwrap();
+}

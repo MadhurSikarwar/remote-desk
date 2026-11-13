@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
+use crate::link::LinkTiming;
 use crate::rendezvous::ServerLink;
 use crate::share::{DisplaySummary, ShareController, ShareSettings, ShareStatus};
 use crate::state::{AppState, Status};
@@ -63,6 +64,7 @@ pub fn start_share(
         lan_discovery: config.network.lan_discovery,
         device_name: config.device.name,
         approval_timeout: Duration::from_secs(u64::from(config.security.approval_timeout_secs)),
+        link: LinkTiming::default(),
     })?;
     // `display` cannot be used as a field name: the macro shadows it.
     let index = display;
@@ -130,6 +132,7 @@ pub fn view_connect(
         policy: config.network.transport,
         received_folder: state.received_folder(),
         clipboard: None,
+        link: LinkTiming::default(),
     };
     viewer.connect_with(&address, &options, &config.device.name, move |packet| {
         // Fails only once the window is gone; the session ends with it.
