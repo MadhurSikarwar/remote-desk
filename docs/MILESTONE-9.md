@@ -62,7 +62,7 @@ them behind the video, so their round trip shows the wait. Rule, in
   has waited) minus the lowest round trip of the last 10 s.
 - Above 300 ms: stop sending video until it is back under 100 ms, and aim
   the encoder at a lower bit rate (cut to 70%, then halved for each further
-  second of waiting, never below 150 kbit/s).
+  second of waiting, never below 150 kbit/s, and never above the maximum set in the settings even when that is lower).
 - Under 100 ms: raise the bit rate again, quickly back to just under where
   the trouble was, gently beyond it, quickly again after a clear spell.
 - A session starts at 30% of the maximum and works up.

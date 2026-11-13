@@ -265,11 +265,33 @@ fn the_rate_never_goes_below_the_minimum_or_above_the_maximum() {
         assert!(d.send && d.bitrate_kbps <= 4000);
     }
     assert_eq!(c.status().bitrate_kbps, 4000);
-    // A maximum below the minimum is raised to it.
-    assert_eq!(
-        Controller::new(10).update(start, 0.0).bitrate_kbps,
-        MIN_KBPS
-    );
+}
+
+#[test]
+fn a_configured_maximum_is_never_exceeded_even_below_the_usual_minimum() {
+    // The settings accept 100 kbit/s, which is under the controller's usual
+    // 150 kbit/s floor: the person's maximum wins, whatever the path does.
+    let start = Instant::now();
+    for max in [1u32, 10, 100, 149, 150, 151, 4000] {
+        let mut c = Controller::new(max);
+        for second in 0..300 {
+            // Congested for the first 60 s, clear afterwards.
+            let delay = if second < 60 { 60_000.0 } else { 0.0 };
+            let d = c.update(start + Duration::from_secs(second), delay);
+            assert!(
+                d.bitrate_kbps <= max,
+                "{max} kbit/s configured, but {} was asked for at {second} s",
+                d.bitrate_kbps
+            );
+            assert!(d.bitrate_kbps >= MIN_KBPS.min(max));
+        }
+        assert_eq!(c.status().max_kbps, max, "the status shows another maximum");
+        assert_eq!(
+            c.status().bitrate_kbps,
+            max,
+            "it never recovered to the maximum"
+        );
+    }
 }
 
 #[test]

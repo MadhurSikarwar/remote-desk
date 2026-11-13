@@ -58,6 +58,9 @@ pub struct CongestionStatus {
 
 pub struct Controller {
     max_kbps: u32,
+    /// The lowest bit rate asked for: [`MIN_KBPS`], or less when the person
+    /// configured a maximum below that.
+    min_kbps: u32,
     /// Fraction of `max_kbps` aimed for, between the minimum and 1.
     scale: f64,
     /// The fraction above which growth is slow: a little under the rate that
@@ -73,22 +76,26 @@ pub struct Controller {
 
 impl Controller {
     pub fn new(max_kbps: u32) -> Self {
-        let max_kbps = max_kbps.max(MIN_KBPS);
-        let scale = START.max(f64::from(MIN_KBPS) / f64::from(max_kbps));
+        // The maximum is the person's: never raised, even when it is below
+        // the usual minimum (the settings accept as little as 100 kbit/s).
+        let max_kbps = max_kbps.max(1);
+        let min_kbps = MIN_KBPS.min(max_kbps);
+        let scale = START.max(f64::from(min_kbps) / f64::from(max_kbps));
         Self {
             max_kbps,
+            min_kbps,
             scale,
             careful_above: 1.0,
             holding: false,
             clear_steps: 0,
             last_step: None,
-            applied_kbps: ((f64::from(max_kbps) * scale).round() as u32).max(MIN_KBPS),
+            applied_kbps: ((f64::from(max_kbps) * scale).round() as u32).max(min_kbps),
             delay_ms: 0.0,
         }
     }
 
     fn floor(&self) -> f64 {
-        f64::from(MIN_KBPS) / f64::from(self.max_kbps)
+        f64::from(self.min_kbps) / f64::from(self.max_kbps)
     }
 
     /// Takes the latest queueing delay and says what to do. Call it often
@@ -143,11 +150,11 @@ impl Controller {
 
     fn pace(&mut self) -> Pace {
         let wanted = (f64::from(self.max_kbps) * self.scale).round() as u32;
-        let wanted = wanted.clamp(MIN_KBPS, self.max_kbps);
+        let wanted = wanted.clamp(self.min_kbps, self.max_kbps);
         let change = (f64::from(wanted) - f64::from(self.applied_kbps)).abs();
         if change >= f64::from(self.applied_kbps) * WORTH_APPLYING
             || wanted == self.max_kbps
-            || wanted == MIN_KBPS
+            || wanted == self.min_kbps
         {
             self.applied_kbps = wanted;
         }
