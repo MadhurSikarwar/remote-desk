@@ -30,7 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rc_capture::{CaptureError, Capturer, DisplayInfo};
 use rc_clipboard::MemoryClipboard;
 use rc_codec::nv12::{bgra_to_nv12, even, nv12_len};
-use rc_codec::{EncoderConfig, H264Encoder};
+use rc_codec::{EncodedFrame, EncoderConfig, H264Encoder};
 use rc_crypto::channel::Side;
 use rc_input::mapping::Rect;
 use rc_input::Injector;
@@ -700,7 +700,7 @@ fn stream_frames(
     let mut controller = Controller::new(settings.bitrate_kbps);
     let mut capturer = Capturer::new(settings.display).map_err(|e| e.to_string())?;
     let mut encoder: Option<H264Encoder> = None;
-    let mut nv12 = Vec::new();
+    let mut retained = Retained::default();
     let mut pacer = Pacer::new(settings.max_fps, Instant::now());
     // What the viewer has been told; `None` until the first message.
     let mut announced: Option<Permissions> = None;
@@ -750,7 +750,22 @@ fn stream_frames(
 
         let frame = match capturer.next_frame(POLL_MS) {
             Ok(Some(frame)) => frame,
-            Ok(None) => continue,
+            Ok(None) => {
+                // Nothing new on screen. A viewer that asked for a fresh
+                // keyframe (its decoder failed, or fell behind) must not have
+                // to wait for the screen to change before it gets one.
+                if let Some(encoder) = encoder.as_mut() {
+                    let now = unix_time().as_micros() as u64;
+                    if let Some(frames) =
+                        retained.keyframe_if_wanted(keyframe_wanted, encoder, now)?
+                    {
+                        if !send_frames(writer, shared, frames) {
+                            return Ok("viewer disconnected");
+                        }
+                    }
+                }
+                continue;
+            }
             Err(CaptureError::AccessDenied) => {
                 shared.blocked.store(true, Ordering::Relaxed);
                 thread::sleep(BLOCKED_RETRY);
@@ -799,35 +814,83 @@ fn stream_frames(
             tracing::debug!(kbps = decision.bitrate_kbps, "video bit rate changed");
         }
 
-        nv12.resize(nv12_len(width as usize, height as usize), 0);
+        let nv12 = retained.picture(width, height);
         bgra_to_nv12(
             frame.data,
             frame.stride(),
             width as usize,
             height as usize,
-            &mut nv12,
+            nv12,
         );
         if keyframe_wanted.swap(false, Ordering::Relaxed) {
             encoder.request_keyframe().map_err(|e| e.to_string())?;
         }
-        for encoded in encoder
-            .encode(&nv12, captured_at)
-            .map_err(|e| e.to_string())?
-        {
-            let bytes = encoded.data.len() as u64;
-            let message = Message::VideoFrame {
-                keyframe: encoded.keyframe,
-                timestamp_us: encoded.timestamp_us,
-                data: encoded.data,
-            };
-            if writer.send(&message).is_err() {
-                return Ok("viewer disconnected");
-            }
-            shared.frames.fetch_add(1, Ordering::Relaxed);
-            shared.bytes.fetch_add(bytes, Ordering::Relaxed);
+        let frames = encoder
+            .encode(&retained.nv12, captured_at)
+            .map_err(|e| e.to_string())?;
+        if !send_frames(writer, shared, frames) {
+            return Ok("viewer disconnected");
         }
 
         thread::sleep(pacer.after_frame(Instant::now()));
+    }
+}
+
+/// Sends encoded frames and counts them. `false` when the viewer is gone.
+fn send_frames(writer: &SecureWriter, shared: &Shared, frames: Vec<EncodedFrame>) -> bool {
+    for encoded in frames {
+        let bytes = encoded.data.len() as u64;
+        let message = Message::VideoFrame {
+            keyframe: encoded.keyframe,
+            timestamp_us: encoded.timestamp_us,
+            data: encoded.data,
+        };
+        if writer.send(&message).is_err() {
+            return false;
+        }
+        shared.frames.fetch_add(1, Ordering::Relaxed);
+        shared.bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+    true
+}
+
+/// The last picture handed to the encoder, kept so that a keyframe can be
+/// made from it when the screen has not changed since.
+#[derive(Default)]
+struct Retained {
+    nv12: Vec<u8>,
+    /// The size of the picture in `nv12`; `None` until there is one.
+    size: Option<(u32, u32)>,
+}
+
+impl Retained {
+    /// The buffer for the next picture, of this size.
+    fn picture(&mut self, width: u32, height: u32) -> &mut Vec<u8> {
+        self.nv12
+            .resize(nv12_len(width as usize, height as usize), 0);
+        self.size = Some((width, height));
+        &mut self.nv12
+    }
+
+    /// If a keyframe is wanted and there is a picture of the size the
+    /// encoder works at, encodes that picture as a keyframe and clears the
+    /// request. Otherwise leaves the request for the next captured frame.
+    fn keyframe_if_wanted(
+        &self,
+        wanted: &AtomicBool,
+        encoder: &mut H264Encoder,
+        at_us: u64,
+    ) -> Result<Option<Vec<EncodedFrame>>, String> {
+        let config = encoder.config();
+        if self.size != Some((config.width, config.height)) || !wanted.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        wanted.store(false, Ordering::Relaxed);
+        encoder.request_keyframe().map_err(|e| e.to_string())?;
+        encoder
+            .encode(&self.nv12, at_us)
+            .map(Some)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -1298,6 +1361,8 @@ pub mod test_support {
 
 #[cfg(test)]
 mod capability_tests;
+#[cfg(all(test, windows))]
+mod keyframe_tests;
 #[cfg(test)]
 mod link_tests;
 #[cfg(test)]
