@@ -35,8 +35,9 @@
         <h2>Share this screen</h2>
         <p class="muted">
           Sharing starts and stops here and nowhere else, and every viewer
-          needs your permission each time. For now a viewer must be on this
-          computer; connecting across a network is the next step.
+          needs your permission each time. By default only this computer can
+          connect; the setting "Let other computers connect" opens it to the
+          network.
         </p>
         <div class="row">
           <label>Display
@@ -49,6 +50,7 @@
           Let the viewer control this computer's mouse and keyboard
         </label>
         <p id="share-stats" role="status"></p>
+        <p id="share-remote" class="banner warn" hidden></p>
         <div id="approval" class="approval" role="alertdialog" aria-labelledby="approval-title" hidden>
           <h3 id="approval-title"></h3>
           <dl>
@@ -78,11 +80,16 @@
       <section>
         <h2>View a screen</h2>
         <div class="row">
-          <label>Port shown by the sharing device (this computer only)
-            <input id="view-port" type="number" min="1" max="65535" />
+          <label>Address shown by the sharing device
+            <input id="view-port" type="text" placeholder="192.168.1.20:51000" spellcheck="false" autocomplete="off" />
           </label>
           <button id="view-toggle" type="button">Connect</button>
         </div>
+        <div class="actions">
+          <button id="find-devices" type="button" class="secondary">Find devices on this network</button>
+          <span id="find-status" class="muted" role="status"></span>
+        </div>
+        <ul id="found"></ul>
         <label class="check">
           <input id="view-control" type="checkbox" disabled />
           <span id="view-control-label">Control the shared screen</span>

@@ -17,6 +17,11 @@
 //! send more data to a victim than the victim's address was sent. A device
 //! also answers at most [`MAX_REPLIES_PER_SECOND`] queries a second.
 //!
+//! **Interfaces.** A single broadcast leaves through only one network
+//! adapter, so a computer with Wi-Fi, Ethernet or a VPN would miss devices on
+//! the others. A scan therefore sends its query separately out of every
+//! IPv4 interface, to that interface's own broadcast address.
+//!
 //! IPv4 only for now.
 
 #![forbid(unsafe_code)]
@@ -270,51 +275,152 @@ fn nonce() -> u64 {
     RandomState::new().build_hasher().finish()
 }
 
-/// Broadcasts a query and collects replies for `wait`.
-///
-/// The query goes to the limited broadcast address and to this computer
-/// itself, so a device sharing on the same computer is found too.
-pub fn scan(wait: Duration) -> Result<Vec<Found>, DiscoveryError> {
-    scan_on(
-        &[
-            SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
-            SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT)),
-        ],
-        wait,
-    )
+/// Where one copy of a query is sent from and to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Route {
+    /// Local address to send from; this selects the network adapter.
+    from: Ipv4Addr,
+    to: SocketAddr,
 }
 
-/// As [`scan`], sending the query to `targets`; for tests.
+/// The broadcast address of a subnet, from an address and its mask.
+fn broadcast_of(ip: Ipv4Addr, mask: Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr::from(u32::from(ip) | !u32::from(mask))
+}
+
+/// One route per usable IPv4 interface, plus one to this computer itself so
+/// that a device sharing on the same computer is found too.
+fn routes(port: u16) -> Vec<Route> {
+    let mut routes = vec![Route {
+        from: Ipv4Addr::UNSPECIFIED,
+        to: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+    }];
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => {
+            for interface in interfaces {
+                let if_addrs::IfAddr::V4(v4) = interface.addr else {
+                    continue;
+                };
+                if v4.ip.is_loopback() || v4.ip.is_unspecified() {
+                    continue;
+                }
+                let broadcast = v4
+                    .broadcast
+                    .unwrap_or_else(|| broadcast_of(v4.ip, v4.netmask));
+                routes.push(Route {
+                    from: v4.ip,
+                    to: SocketAddr::from((broadcast, port)),
+                });
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot list network interfaces; using one broadcast");
+            routes.push(Route {
+                from: Ipv4Addr::UNSPECIFIED,
+                to: SocketAddr::from((Ipv4Addr::BROADCAST, port)),
+            });
+        }
+    }
+    routes
+}
+
+/// How good an address is for reaching a device: ordinary addresses first,
+/// then link-local (169.254.x.x, usually no network is configured), then
+/// this computer.
+fn address_rank(ip: IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v4) if v4.is_loopback() => 2,
+        IpAddr::V4(v4) if v4.is_link_local() => 1,
+        _ => 0,
+    }
+}
+
+/// Keeps one entry per device (per public key), at its best address.
+fn one_per_device(found: Vec<Found>) -> Vec<Found> {
+    let mut best: Vec<Found> = Vec::new();
+    for entry in found {
+        match best
+            .iter_mut()
+            .find(|b| b.announcement.public_key == entry.announcement.public_key)
+        {
+            Some(existing) => {
+                if address_rank(entry.address) < address_rank(existing.address) {
+                    *existing = entry;
+                }
+            }
+            None => best.push(entry),
+        }
+    }
+    best
+}
+
+/// Sends a query out of every interface and collects replies for `wait`.
+/// Each device is listed once.
+pub fn scan(wait: Duration) -> Result<Vec<Found>, DiscoveryError> {
+    scan_routes(&routes(DISCOVERY_PORT), wait)
+}
+
+/// As [`scan`], sending the query to `targets` from no particular
+/// interface; for tests.
 pub fn scan_on(targets: &[SocketAddr], wait: Duration) -> Result<Vec<Found>, DiscoveryError> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    socket.set_broadcast(true)?;
-    socket.set_read_timeout(Some(RECEIVE_POLL))?;
+    let routes: Vec<Route> = targets
+        .iter()
+        .map(|to| Route {
+            from: Ipv4Addr::UNSPECIFIED,
+            to: *to,
+        })
+        .collect();
+    scan_routes(&routes, wait)
+}
+
+fn scan_routes(routes: &[Route], wait: Duration) -> Result<Vec<Found>, DiscoveryError> {
     let nonce = nonce();
     let query = encode_query(nonce);
-    for target in targets {
-        // A target that cannot be reached (no network) is not an error.
-        let _ = socket.send_to(&query, target);
+
+    // One socket per route. A route that cannot be used (an interface that
+    // just went away) is skipped, not an error.
+    let mut sockets = Vec::new();
+    for route in routes {
+        let Ok(socket) = UdpSocket::bind((route.from, 0)) else {
+            continue;
+        };
+        if socket.set_broadcast(true).is_err() || socket.set_nonblocking(true).is_err() {
+            continue;
+        }
+        let _ = socket.send_to(&query, route.to);
+        sockets.push(socket);
+    }
+    if sockets.is_empty() {
+        return Err(DiscoveryError::Io(io::Error::other(
+            "no usable network interface",
+        )));
     }
 
     let mut found: Vec<Found> = Vec::new();
     let mut buffer = [0u8; 512];
     let deadline = Instant::now() + wait;
     while Instant::now() < deadline && found.len() < MAX_RESULTS {
-        let Ok((len, from)) = socket.recv_from(&mut buffer) else {
-            continue;
-        };
-        let Some((reply_nonce, announcement)) = decode_reply(&buffer[..len]) else {
-            continue;
-        };
-        let entry = Found {
-            address: from.ip(),
-            announcement,
-        };
-        if reply_nonce == nonce && !found.contains(&entry) {
-            found.push(entry);
+        let mut received = false;
+        for socket in &sockets {
+            while let Ok((len, from)) = socket.recv_from(&mut buffer) {
+                received = true;
+                let Some((reply_nonce, announcement)) = decode_reply(&buffer[..len]) else {
+                    continue;
+                };
+                let entry = Found {
+                    address: from.ip(),
+                    announcement,
+                };
+                if reply_nonce == nonce && !found.contains(&entry) {
+                    found.push(entry);
+                }
+            }
+        }
+        if !received {
+            thread::sleep(Duration::from_millis(10));
         }
     }
-    Ok(found)
+    Ok(one_per_device(found))
 }
 
 /// The address other computers most likely reach this one at: the local
@@ -491,6 +597,69 @@ mod tests {
         // Bind the same port a second time, as a second instance would.
         let second = Responder::start_on(first.port(), announcement());
         assert!(second.is_ok(), "{:?}", second.err());
+    }
+
+    #[test]
+    fn broadcast_addresses_follow_from_the_mask() {
+        let ip = Ipv4Addr::new(172, 17, 12, 212);
+        assert_eq!(
+            broadcast_of(ip, Ipv4Addr::new(255, 255, 240, 0)),
+            Ipv4Addr::new(172, 17, 15, 255)
+        );
+        assert_eq!(
+            broadcast_of(
+                Ipv4Addr::new(192, 168, 1, 7),
+                Ipv4Addr::new(255, 255, 255, 0)
+            ),
+            Ipv4Addr::new(192, 168, 1, 255)
+        );
+        assert_eq!(
+            broadcast_of(ip, Ipv4Addr::new(255, 255, 255, 255)),
+            ip,
+            "a /32 has no other host"
+        );
+    }
+
+    #[test]
+    fn there_is_a_route_to_this_computer_and_one_per_usable_interface() {
+        let routes = routes(DISCOVERY_PORT);
+        assert_eq!(
+            routes[0].to,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT))
+        );
+        for route in &routes[1..] {
+            assert_eq!(route.to.port(), DISCOVERY_PORT);
+            assert!(!route.from.is_loopback(), "{route:?}");
+        }
+    }
+
+    #[test]
+    fn a_device_seen_at_several_addresses_is_listed_once_at_the_best() {
+        let entry = |ip: [u8; 4], key: u8| Found {
+            address: IpAddr::from(ip),
+            announcement: Announcement {
+                public_key: [key; KEY_LEN],
+                ..announcement()
+            },
+        };
+        let merged = one_per_device(vec![
+            entry([127, 0, 0, 1], 1),
+            entry([169, 254, 1, 2], 1),
+            entry([172, 17, 12, 212], 1),
+            entry([127, 0, 0, 1], 2),
+            entry([192, 168, 0, 9], 3),
+            entry([169, 254, 9, 9], 3),
+        ]);
+        let at = |key: u8| {
+            merged
+                .iter()
+                .find(|f| f.announcement.public_key == [key; KEY_LEN])
+                .map(|f| f.address)
+        };
+        assert_eq!(merged.len(), 3);
+        assert_eq!(at(1), Some(IpAddr::from([172, 17, 12, 212])));
+        assert_eq!(at(2), Some(IpAddr::from([127, 0, 0, 1])));
+        assert_eq!(at(3), Some(IpAddr::from([192, 168, 0, 9])));
     }
 
     #[test]

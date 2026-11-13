@@ -88,7 +88,7 @@
       : status.pending
         ? "A viewer is waiting for your answer"
         : status.active
-          ? "Sharing on — no viewer"
+          ? status.remote ? "Sharing on — open to the network" : "Sharing on — no viewer"
           : "Not sharing";
     pill.classList.toggle("live", live);
     pill.classList.toggle("armed", status.active && !live);
@@ -111,11 +111,24 @@
     } else if (live) {
       shareStats.textContent = `Port ${status.port}. ${status.width}×${status.height} — ${sent}.`;
     } else {
-      shareStats.textContent = `Port ${status.port}. Waiting for a viewer on this computer.`;
+      shareStats.textContent = status.remote
+        ? `Port ${status.port}. Waiting for a viewer.`
+        : `Port ${status.port}. Waiting for a viewer on this computer.`;
     }
 
-    if (status.active && status.port && !viewing) {
-      viewPort.value = status.port;
+    const remote = $("share-remote");
+    remote.hidden = !(status.active && status.remote);
+    if (!remote.hidden) {
+      const where = status.lan_address ? `${status.lan_address}:${status.port}` : `this computer's address, port ${status.port}`;
+      remote.textContent =
+        `Other computers on your network can reach this one at ${where}. ` +
+        (status.discoverable ? "It also answers \"who is sharing?\" on the local network. " : "") +
+        "Each viewer still needs your permission.";
+    }
+
+    // Handy when testing with a second window on this computer.
+    if (status.active && status.port && !viewing && !viewPort.value) {
+      viewPort.value = `127.0.0.1:${status.port}`;
     }
     if (status.active && shareTimer === null) {
       // Twice a second, so a viewer's request appears promptly.
@@ -372,14 +385,56 @@
     viewStats.textContent = `Ended: ${reason}. ${totals.drawn} frames shown.`;
   }
 
+  // The key a discovery result announced; a typed address has none. The
+  // connection is refused if the device at the address holds another.
+  let expectedKey = null;
+  viewPort.addEventListener("input", () => { expectedKey = null; });
+
+  const findButton = $("find-devices");
+  const findStatus = $("find-status");
+
+  findButton.addEventListener("click", async () => {
+    findButton.disabled = true;
+    findStatus.textContent = "Looking…";
+    try {
+      const devices = await invoke("discover_devices");
+      findStatus.textContent = devices.length === 0
+        ? "Nothing found. The other device must be sharing with 'Let other computers connect' on, and be on this network."
+        : `${devices.length} found. Names are what each device says about itself; compare the key.`;
+      $("found").replaceChildren(...devices.map((device) => {
+        const item = document.createElement("li");
+        const label = document.createElement("span");
+        const name = document.createElement("strong");
+        name.textContent = device.name + (device.this_device ? " (this device)" : "");
+        const detail = document.createElement("div");
+        detail.className = "detail";
+        detail.textContent = `${device.address} — key ${device.fingerprint}`;
+        label.append(name, detail);
+        const use = document.createElement("button");
+        use.type = "button";
+        use.textContent = "Connect";
+        use.addEventListener("click", () => {
+          viewPort.value = device.address;
+          expectedKey = device.public_key;
+          if (!viewing) viewToggle.click();
+        });
+        item.append(label, use);
+        return item;
+      }));
+    } catch (error) {
+      findStatus.textContent = message(error);
+    }
+    findButton.disabled = false;
+  });
+
   viewToggle.addEventListener("click", async () => {
     viewToggle.disabled = true;
     try {
       if (viewing) {
         await invoke("view_disconnect");
       } else {
-        const port = Number.parseInt(viewPort.value, 10);
-        if (!(port >= 1 && port <= 65535)) throw new Error("Enter the port shown by the sharing device");
+        const address = viewPort.value.trim();
+        if (!address) throw new Error("Enter the address shown by the sharing device, or find it on the network");
         if (!("VideoDecoder" in window)) throw new Error("This system's web view cannot decode video");
         Object.keys(totals).forEach((key) => { totals[key] = 0; });
         lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
@@ -389,7 +444,7 @@
         viewing = true;
         let host;
         try {
-          host = await invoke("view_connect", { port, packets });
+          host = await invoke("view_connect", { address, expectedKey, packets });
         } catch (error) {
           viewing = false;
           throw error;

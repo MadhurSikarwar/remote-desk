@@ -154,6 +154,34 @@ button.secondary {
   padding: 4px 12px;
 }
 
+.banner.warn {
+  margin: 12px 0 0;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  color: var(--text);
+}
+
+#found {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+#found li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+#found .detail {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .row > button {
   margin-bottom: 12px;
 }
