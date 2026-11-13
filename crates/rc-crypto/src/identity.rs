@@ -220,11 +220,13 @@ impl Identity {
         }
         // `create_new` so that two instances starting together cannot each
         // write a different identity over the other's.
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(io_error(path))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Where the key is not encrypted (outside Windows) the owner alone
+        // may read it.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(path).map_err(io_error(path))?;
         file.write_all(&bytes)
             .and_then(|()| file.sync_all())
             .map_err(io_error(path))

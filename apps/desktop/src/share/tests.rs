@@ -367,6 +367,7 @@ fn stop_returns_promptly_with_a_request_pending_or_a_silent_viewer() {
 }
 
 /// Pointer position in physical pixels.
+#[cfg(windows)]
 fn pointer() -> (i32, i32) {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::HiDpi::{
@@ -383,6 +384,7 @@ fn pointer() -> (i32, i32) {
     (point.x, point.y)
 }
 
+#[cfg(windows)]
 fn shift_is_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
     // SAFETY: plain call without pointers.
@@ -400,6 +402,7 @@ fn next_permissions(reader: &mut SecureReader, host: &ShareController) -> bool {
     }
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "moves the real mouse pointer and presses Shift briefly"]
 fn input_works_only_while_the_host_allows_it() {

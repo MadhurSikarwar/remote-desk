@@ -47,7 +47,7 @@ fn write_bmp(path: &str, width: u32, height: u32, bgra: &[u8]) -> std::io::Resul
     out.flush()
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let seconds: u64 = args.next().map(|s| s.parse()).transpose()?.unwrap_or(5);
     let display: usize = args.next().map(|s| s.parse()).transpose()?.unwrap_or(0);

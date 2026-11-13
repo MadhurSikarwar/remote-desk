@@ -8,11 +8,15 @@ mod frame;
 
 #[cfg(windows)]
 mod dxgi;
+#[cfg(not(windows))]
+mod unsupported;
 
 pub use frame::{copy_rows, Frame};
 
 #[cfg(windows)]
 pub use dxgi::{list_displays, Capturer};
+#[cfg(not(windows))]
+pub use unsupported::{list_displays, Capturer};
 
 /// A monitor attached to the desktop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,4 +55,7 @@ pub enum CaptureError {
     Unsupported(String),
     #[error("capture failed: {0}")]
     Platform(String),
+    /// Screen capture is not implemented for this operating system yet.
+    #[error("sharing this computer's screen is not supported on this operating system yet (it works on Windows only)")]
+    UnsupportedSystem,
 }

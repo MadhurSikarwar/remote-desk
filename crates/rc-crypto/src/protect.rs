@@ -80,14 +80,17 @@ mod imp {
 mod imp {
     use super::CryptoError;
 
-    const UNSUPPORTED: &str = "protected storage is only implemented on Windows";
-
-    pub fn protect(_secret: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        Err(CryptoError::KeyUnreadable(UNSUPPORTED.to_owned()))
+    // Outside Windows there is no per-user encryption of this kind to rely
+    // on yet (the macOS Keychain and the Linux Secret Service would be the
+    // places). The key is stored as it is and protected only by the file's
+    // permissions: readable and writable by its owner alone (see
+    // `Identity::save`). Anyone who can read the owner's files can use it.
+    pub fn protect(secret: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        Ok(secret.to_vec())
     }
 
-    pub fn unprotect(_protected: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        Err(CryptoError::KeyUnreadable(UNSUPPORTED.to_owned()))
+    pub fn unprotect(protected: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        Ok(protected.to_vec())
     }
 }
 

@@ -27,9 +27,11 @@ use std::time::Duration;
 mod memory;
 #[cfg(windows)]
 mod system;
+#[cfg(not(windows))]
+#[path = "system_other.rs"]
+mod system;
 
 pub use memory::MemoryClipboard;
-#[cfg(windows)]
 pub use system::SystemClipboard;
 
 #[derive(Debug, thiserror::Error)]

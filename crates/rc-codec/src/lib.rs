@@ -7,9 +7,13 @@ pub mod nv12;
 
 #[cfg(windows)]
 mod mf_encoder;
+#[cfg(not(windows))]
+mod unsupported;
 
 #[cfg(windows)]
 pub use mf_encoder::H264Encoder;
+#[cfg(not(windows))]
+pub use unsupported::H264Encoder;
 
 /// What to encode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,4 +44,9 @@ pub enum CodecError {
     WrongFrameSize { expected: usize, actual: usize },
     #[error("encoder failed: {0}")]
     Platform(String),
+    /// Video encoding is not implemented for this operating system yet.
+    #[error(
+        "video encoding is not supported on this operating system yet (it works on Windows only)"
+    )]
+    UnsupportedSystem,
 }

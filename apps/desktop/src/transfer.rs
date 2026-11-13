@@ -161,13 +161,19 @@ fn unused_name(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{stem} (copy){ext}"))
 }
 
-/// Marks a saved file as having come from another computer (NTFS only;
-/// elsewhere this quietly does nothing).
+/// Marks a saved file as having come from another computer, so Windows
+/// warns before it is run (an NTFS stream). Other systems have no mark that
+/// is set this way (macOS has a quarantine attribute, not done yet), and the
+/// stream name must not be used there: it would make a stray file.
+#[cfg(windows)]
 fn mark_as_downloaded(path: &Path) {
     let mut stream = path.as_os_str().to_owned();
     stream.push(":Zone.Identifier");
     let _ = fs::write(stream, "[ZoneTransfer]\r\nZoneId=3\r\n");
 }
+
+#[cfg(not(windows))]
+fn mark_as_downloaded(_path: &Path) {}
 
 enum Work {
     None,

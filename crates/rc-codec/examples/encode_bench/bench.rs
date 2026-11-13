@@ -13,7 +13,7 @@ use rc_capture::Capturer;
 use rc_codec::nv12::{bgra_to_nv12, even, nv12_len};
 use rc_codec::{EncoderConfig, H264Encoder};
 
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let seconds: u64 = args.next().map(|s| s.parse()).transpose()?.unwrap_or(5);
     let path = args.next().unwrap_or_else(|| "capture.h264".to_owned());

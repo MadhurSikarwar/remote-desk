@@ -215,8 +215,14 @@ fn a_file_is_offered_accepted_sent_verified_and_saved() {
     assert_eq!(sent.detail.as_deref(), Some("delivered"));
 
     // Marked as coming from another computer (NTFS alternate data stream).
-    let mark = fs::read_to_string(format!("{}:Zone.Identifier", saved.display())).unwrap();
-    assert!(mark.contains("ZoneId=3"), "{mark:?}");
+    #[cfg(windows)]
+    {
+        let mark = fs::read_to_string(format!("{}:Zone.Identifier", saved.display())).unwrap();
+        assert!(mark.contains("ZoneId=3"), "{mark:?}");
+    }
+    // Elsewhere no such mark is made, and no stray file appears beside it.
+    #[cfg(not(windows))]
+    assert_eq!(files_in(&pair.received_by_b()), ["report (final).pdf"]);
 }
 
 #[test]
