@@ -160,6 +160,8 @@ Tested:
 3. **A relayed session with a perfectly still screen and no input ends after
    15 minutes**, because the session itself has no keepalive. Fixing it
    belongs with reconnect handling (milestone 9).
+   *Fixed in milestone 9: both ends now ping every 5 s, so a still relayed
+   session is no longer idle.*
 4. **Open server.** Anyone who can reach the server and has its address can
    register and use the relay; there is no allow-list or accounts, so a
    public server would carry strangers' traffic. Fine for a private server
