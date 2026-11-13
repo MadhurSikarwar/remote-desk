@@ -155,6 +155,9 @@ struct Shared {
     files_allowed: AtomicBool,
     /// The running session's clipboard and file transfers, if any.
     capabilities: Mutex<Option<Arc<Capabilities>>>,
+    /// The running session's input injector, so that switching control off
+    /// can let go of held keys and buttons at once.
+    injector: Mutex<Option<Arc<Mutex<Injector>>>>,
     /// Liveness and round-trip time of the running session, if any.
     link: Mutex<Option<Arc<Link>>>,
     /// What the video is being slowed to, while a session adapts.
@@ -174,6 +177,43 @@ struct Shared {
 }
 
 impl Shared {
+    /// The host's switch for control. Turning it off also lets go of held
+    /// keys and buttons. The session's reader checks the switch for every
+    /// event while holding the injector, so once this has taken the injector
+    /// itself nothing can be injected after it.
+    fn set_input(&self, allowed: bool) {
+        self.input_allowed.store(allowed, Ordering::Relaxed);
+        if !allowed {
+            let injector = lock(&self.injector).clone();
+            if let Some(injector) = injector {
+                lock(&injector).release_all();
+            }
+        }
+    }
+
+    /// The host's switch for clipboard sync. Off takes effect at once; on is
+    /// applied by the session after it has told the viewer.
+    fn set_clipboard(&self, allowed: bool) {
+        self.clipboard_allowed.store(allowed, Ordering::Relaxed);
+        if !allowed {
+            let capabilities = lock(&self.capabilities).clone();
+            if let Some(capabilities) = capabilities {
+                capabilities.set_clipboard(false);
+            }
+        }
+    }
+
+    /// The host's switch for file transfer. Off ends what is in progress.
+    fn set_files(&self, allowed: bool) {
+        self.files_allowed.store(allowed, Ordering::Relaxed);
+        if !allowed {
+            let capabilities = lock(&self.capabilities).clone();
+            if let Some(capabilities) = capabilities {
+                capabilities.revoke_files();
+            }
+        }
+    }
+
     /// Status for a worker that is neither remote nor discoverable.
     #[cfg(test)]
     fn status(&self, port: u16, seconds: f64, active: bool) -> ShareStatus {
@@ -519,14 +559,15 @@ fn run_session(
         .into_iter()
         .nth(settings.display)
         .ok_or_else(|| format!("display {} does not exist", settings.display))?;
-    // Shared by the reader, which injects, and this thread, which makes it
-    // let go of everything when the host withdraws control.
+    // Shared by the reader, which injects, and the host's switch, which makes
+    // it let go of everything when control is withdrawn.
     let injector = Arc::new(Mutex::new(Injector::new(Rect {
         x: display.x,
         y: display.y,
         width: display.width,
         height: display.height,
     })));
+    *lock(&shared.injector) = Some(Arc::clone(&injector));
 
     // A second thread reads what the viewer sends while this one writes.
     let closed = Arc::new(AtomicBool::new(false));
@@ -593,6 +634,7 @@ fn run_session(
     lock(&injector).release_all();
     capabilities.end();
     *lock(&shared.capabilities) = None;
+    *lock(&shared.injector) = None;
     *lock(&shared.link) = None;
     *lock(&shared.congestion) = None;
 
@@ -1089,37 +1131,39 @@ impl ShareController {
         Err("That request is no longer waiting for an answer".to_owned())
     }
 
-    /// Turns the viewer's mouse and keyboard control on or off. Takes
-    /// effect immediately, also for a viewer that is already connected.
+    /// The state of the running worker, taken out so that nothing is waited
+    /// for while the worker lock is held.
+    fn shared(&self) -> Option<Arc<Shared>> {
+        lock(&self.worker)
+            .as_ref()
+            .map(|worker| Arc::clone(&worker.shared))
+    }
+
+    /// Turns the viewer's mouse and keyboard control on or off. Switching it
+    /// off is complete when this returns: nothing more is injected and every
+    /// key and button the viewer held is let go of. Switching it on is
+    /// announced to the viewer by the session, as before.
     pub fn set_input_allowed(&self, allowed: bool) -> ShareStatus {
-        if let Some(worker) = lock(&self.worker).as_ref() {
-            worker
-                .shared
-                .input_allowed
-                .store(allowed, Ordering::Relaxed);
+        if let Some(shared) = self.shared() {
+            shared.set_input(allowed);
         }
         self.status()
     }
 
-    /// Allows or forbids clipboard text sync. Takes effect at once.
+    /// Allows or forbids clipboard text sync. Forbidding it is complete when
+    /// this returns: nothing more is sent or written.
     pub fn set_clipboard_allowed(&self, allowed: bool) -> ShareStatus {
-        if let Some(worker) = lock(&self.worker).as_ref() {
-            worker
-                .shared
-                .clipboard_allowed
-                .store(allowed, Ordering::Relaxed);
+        if let Some(shared) = self.shared() {
+            shared.set_clipboard(allowed);
         }
         self.status()
     }
 
-    /// Allows or forbids file transfer. Forbidding ends transfers in
-    /// progress.
+    /// Allows or forbids file transfer. Forbidding it ends the transfers in
+    /// progress and removes half-written files before this returns.
     pub fn set_files_allowed(&self, allowed: bool) -> ShareStatus {
-        if let Some(worker) = lock(&self.worker).as_ref() {
-            worker
-                .shared
-                .files_allowed
-                .store(allowed, Ordering::Relaxed);
+        if let Some(shared) = self.shared() {
+            shared.set_files(allowed);
         }
         self.status()
     }
@@ -1247,5 +1291,7 @@ pub mod test_support {
 mod capability_tests;
 #[cfg(test)]
 mod link_tests;
+#[cfg(test)]
+mod revocation_tests;
 #[cfg(test)]
 mod tests;

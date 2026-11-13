@@ -103,7 +103,10 @@ impl ClipboardSync {
             .spawn(move || {
                 while !watcher.stop.load(Ordering::Relaxed) {
                     if let Some(text) = watcher.poll_once() {
-                        on_local(text);
+                        // Switched off since it was read: do not send it.
+                        if watcher.enabled.load(Ordering::Relaxed) {
+                            on_local(text);
+                        }
                     }
                     thread::sleep(poll);
                 }
@@ -136,6 +139,12 @@ impl ClipboardSync {
             return Ok(false);
         }
         let mut backend = locked(&self.inner.backend);
+        // Looked at again with the clipboard held: `set_enabled` changes the
+        // switch under the same lock, so once it has returned "off" nothing
+        // more is written.
+        if !self.is_enabled() {
+            return Ok(false);
+        }
         backend.write_text(text)?;
         // Everything the write did to the sequence number is ours.
         *locked(&self.inner.seen) = backend.sequence();

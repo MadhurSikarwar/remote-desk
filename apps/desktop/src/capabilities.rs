@@ -112,6 +112,15 @@ impl Capabilities {
             .map_or((0, 0), ClipboardSync::counts)
     }
 
+    /// Forbids file transfers at once, for the person switching them off:
+    /// see [`Transfers::revoke`].
+    pub fn revoke_files(&self) {
+        if self.transfers.is_allowed() {
+            tracing::info!(on = false, "file transfer switched");
+        }
+        self.transfers.revoke();
+    }
+
     /// Allows or forbids file transfers at this end.
     pub fn set_files(&self, on: bool) {
         if self.transfers.is_allowed() != on {

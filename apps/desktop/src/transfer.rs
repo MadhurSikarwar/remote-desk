@@ -26,7 +26,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rc_protocol::{Message, MAX_FILE_CHUNK_BYTES};
@@ -271,7 +271,7 @@ pub struct Transfers {
     offer_timeout: Duration,
     allowed: AtomicBool,
     inner: Mutex<Inner>,
-    send: Sender,
+    send: Arc<dyn Fn(Message) -> Result<(), String> + Send + Sync>,
 }
 
 impl Transfers {
@@ -286,7 +286,7 @@ impl Transfers {
                 next_id: 1,
                 entries: Vec::new(),
             }),
-            send,
+            send: Arc::from(send),
         }
     }
 
@@ -316,22 +316,47 @@ impl Transfers {
         }
     }
 
+    /// Forbids transfers and ends what is in progress, for the person
+    /// switching them off. Everything local is done before this returns:
+    /// nothing more is accepted or written and half-written files are gone.
+    /// The notices to the other end go out on a thread of their own, so a
+    /// stalled connection cannot hold up the caller (which is the window).
+    pub fn revoke(&self) {
+        self.allowed.store(false, Ordering::Relaxed);
+        let messages = self.end_all("file transfer was switched off");
+        if messages.is_empty() {
+            return;
+        }
+        let send = Arc::clone(&self.send);
+        let _ = std::thread::Builder::new()
+            .name("transfer-cancel".into())
+            .spawn(move || {
+                for message in messages {
+                    let _ = send(message);
+                }
+            });
+    }
+
     /// Ends everything in progress, telling the other end. Used when
     /// transfers are forbidden and when the session ends.
     pub fn cancel_all(&self, reason: &str) {
-        let mut messages = Vec::new();
-        {
-            let mut inner = lock(&self.inner);
-            for entry in inner.entries.iter_mut().filter(|e| e.state.active()) {
-                messages.push(Message::FileCancel {
-                    id: entry.id,
-                    by_sender: entry.direction == Direction::Outgoing,
-                    reason: reason.to_owned(),
-                });
-                entry.end(State::Cancelled, reason.to_owned());
-            }
-        }
+        let messages = self.end_all(reason);
         self.tell(messages);
+    }
+
+    /// Ends everything in progress and returns the notices to send.
+    fn end_all(&self, reason: &str) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let mut inner = lock(&self.inner);
+        for entry in inner.entries.iter_mut().filter(|e| e.state.active()) {
+            messages.push(Message::FileCancel {
+                id: entry.id,
+                by_sender: entry.direction == Direction::Outgoing,
+                reason: reason.to_owned(),
+            });
+            entry.end(State::Cancelled, reason.to_owned());
+        }
+        messages
     }
 
     /// Refuses offers nobody answered in time.
