@@ -20,6 +20,7 @@ fn defaults_are_valid_and_secure() {
     assert!(config.security.approval_timeout_secs > 0);
     assert!(config.network.rendezvous_servers.is_empty());
     assert!(config.network.relay_servers.is_empty());
+    assert!(!config.network.allow_remote_connections);
 }
 
 #[test]
@@ -43,6 +44,7 @@ fn save_then_load_round_trips() {
     config.network.rendezvous_servers = vec!["rv.example.org:443".into()];
     config.network.relay_servers = vec!["[2001:db8::1]:443".into()];
     config.network.direct_port = 47000;
+    config.network.allow_remote_connections = true;
     config.network.lan_discovery = false;
     config.network.transport = TransportPolicy::RelayOnly;
     config.security.approval_timeout_secs = 60;

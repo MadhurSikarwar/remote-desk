@@ -151,11 +151,12 @@
           <label>Relay servers (one <code>host:port</code> per line)
             <textarea name="network.relay_servers" rows="2" spellcheck="false"></textarea>
           </label>
+          <label class="check"><input name="network.allow_remote_connections" type="checkbox" /> Let other computers connect while I am sharing (each one still needs your permission)</label>
           <div class="row">
             <label>Direct connection port (0 = automatic)
               <input name="network.direct_port" type="number" min="0" max="65535" />
             </label>
-            <label class="check"><input name="network.lan_discovery" type="checkbox" /> Find devices on the local network</label>
+            <label class="check"><input name="network.lan_discovery" type="checkbox" /> Let devices on the local network find this one while sharing</label>
           </div>
         </section>
 

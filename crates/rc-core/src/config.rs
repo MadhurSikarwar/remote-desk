@@ -89,6 +89,12 @@ pub struct NetworkConfig {
     pub relay_servers: Vec<String>,
     /// Local port for direct connections; 0 lets the OS choose.
     pub direct_port: u16,
+    /// Let other computers connect to this one while sharing is on. Off by
+    /// default: sharing then accepts viewers on this computer only. Every
+    /// viewer is still encrypted and still needs the user's approval.
+    pub allow_remote_connections: bool,
+    /// While remote connections are allowed, answer "who is sharing?"
+    /// queries from the local network.
     pub lan_discovery: bool,
     pub transport: TransportPolicy,
 }
@@ -99,6 +105,7 @@ impl Default for NetworkConfig {
             rendezvous_servers: Vec::new(),
             relay_servers: Vec::new(),
             direct_port: 0,
+            allow_remote_connections: false,
             lan_discovery: true,
             transport: TransportPolicy::Auto,
         }
