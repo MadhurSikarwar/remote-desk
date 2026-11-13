@@ -21,6 +21,10 @@ impl TestServer {
     }
 
     pub fn start_on(port: u16, key: Identity) -> Self {
+        Self::start_with(port, key, Limits::default())
+    }
+
+    pub fn start_with(port: u16, key: Identity, limits: Limits) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -30,7 +34,7 @@ impl TestServer {
             .block_on(Server::start(Config {
                 listen: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
                 identity: key.clone(),
-                limits: Limits::default(),
+                limits,
             }))
             .unwrap();
         let address = server.local_addr();
@@ -713,5 +717,76 @@ mod sessions {
         wait_until("the device to be unregistered", || {
             server.stats().registered == 0
         });
+    }
+    #[test]
+    #[ignore = "needs an interactive desktop with a monitor"]
+    fn a_relayed_session_outlives_the_relays_idle_limit_because_of_the_pings() {
+        use crate::link::LinkTiming;
+
+        let _desktop = desktop();
+        // A relay that closes after 1.2 s without traffic.
+        let server = TestServer::start_with(
+            0,
+            Identity::generate().unwrap(),
+            Limits {
+                relay_idle_timeout: Duration::from_millis(1200),
+                ..Limits::default()
+            },
+        );
+        let link = server.link();
+        let quick = LinkTiming {
+            ping_every: Duration::from_millis(200),
+            timeout: Duration::from_secs(3),
+        };
+        let (host_keys, _d) = security();
+        let host = ShareController::new(Some(Arc::clone(&host_keys)));
+        host.start(sharing(&link, |s| {
+            s.advertised_port = Some(closed_port());
+            s.link = quick;
+        }))
+        .unwrap();
+        registered(&host);
+
+        let (viewing, tx) = viewer();
+        let options = ConnectOptions {
+            server: Some(link.clone()),
+            policy: TransportPolicy::RelayOnly,
+            link: quick,
+            ..ConnectOptions::default()
+        };
+        let info = viewing
+            .viewer
+            .connect_with(&host_keys.fingerprint(), &options, "Viewer PC", move |p| {
+                let _ = tx.send(p);
+            })
+            .expect("connecting failed");
+        assert_eq!(info.route, "through the server");
+        host.answer(pending(&host).id, true, false).unwrap();
+        loop {
+            let packet = viewing
+                .packets
+                .recv_timeout(Duration::from_secs(10))
+                .expect("no picture arrived");
+            if packet[0] == packet::FRAME {
+                break;
+            }
+        }
+
+        // More than three idle limits. Whether the screen changes or not, the
+        // pings are traffic, so the relay must not close the session.
+        thread::sleep(Duration::from_millis(4500));
+        assert!(host.status().viewer_connected, "the host lost the viewer");
+        let status = viewing.viewer.status().expect("the viewer's session ended");
+        assert!(status.link.pongs_received >= 10, "{:?}", status.link);
+        assert!(
+            viewing
+                .packets
+                .try_iter()
+                .all(|p| p[0] != packet::ENDED && p[0] != packet::LOST),
+            "the session ended"
+        );
+        viewing.viewer.disconnect();
+        wait_share("the session to end", || !host.status().viewer_connected);
+        host.stop();
     }
 }
