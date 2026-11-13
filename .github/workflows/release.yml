@@ -37,7 +37,7 @@ jobs:
         with:
           path: artifacts
       - name: Name the files and write checksums
-        run: ci/collect-release.sh artifacts release
+        run: bash ci/collect-release.sh artifacts release
       - name: Release notes
         run: |
           cat > notes.md <<'NOTES'
