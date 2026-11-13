@@ -16,11 +16,14 @@ rc-crypto = { path = "../../crates/rc-crypto" }
 rc-input = { path = "../../crates/rc-input" }
 rc-net = { path = "../../crates/rc-net" }
 rc-protocol = { path = "../../crates/rc-protocol" }
+rc-rendezvous = { path = "../../crates/rc-rendezvous" }
 serde.workspace = true
 tauri.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rc-server = { path = "../server" }
+tokio.workspace = true
 serde_json = "1"
 tempfile.workspace = true
 
