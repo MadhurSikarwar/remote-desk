@@ -371,8 +371,24 @@
   let size = { width: 0, height: 0 };
   let statsTimer = null;
   // Running totals; `window.__viewStats` exposes them for inspection.
-  const totals = { received: 0, drawn: 0, skipped: 0, decodeErrors: 0, latencyMsSum: 0 };
-  let lastTick = { drawn: 0, latencyMsSum: 0, time: 0 };
+  const totals = { received: 0, drawn: 0, skipped: 0, decodeErrors: 0, decodeMsSum: 0, decoded: 0 };
+  let lastTick = { drawn: 0, decoded: 0, decodeMsSum: 0, time: 0 };
+
+  // What can be measured honestly. The host stamps each picture with its own
+  // clock's time of capture, and the two computers' clocks are not the same,
+  // so "now minus capture time" is not a delay (it can be negative, or minutes
+  // out). Two things are fine without agreeing clocks: how long the viewer's
+  // own decoder takes (two readings of the viewer's clock), and how much later
+  // pictures arrive than they recently did (the unknown offset between the
+  // clocks is the same in both and cancels).
+  const decodeStarts = new Map(); // picture timestamp -> when it was handed to the decoder
+  const arrivals = [];            // { t: when it arrived, late: arrival minus capture, both clocks }
+  const RECENT_MS = 10_000;
+
+  function forgetTimings() {
+    decodeStarts.clear();
+    arrivals.length = 0;
+  }
   window.__viewStats = totals;
 
   function requestKeyframe() {
@@ -386,7 +402,12 @@
       output(frame) {
         context.drawImage(frame, 0, 0, canvas.width, canvas.height);
         // The frame's timestamp is its capture time on the host's clock.
-        totals.latencyMsSum += Date.now() - frame.timestamp / 1000;
+        const began = decodeStarts.get(frame.timestamp);
+        if (began !== undefined) {
+          decodeStarts.delete(frame.timestamp);
+          totals.decodeMsSum += performance.now() - began;
+          totals.decoded += 1;
+        }
         totals.drawn += 1;
         frame.close();
       },
@@ -427,9 +448,13 @@
         return;
       }
       needKeyframe = false;
+      const timestamp = Number(view.getBigUint64(2, true)); // microseconds, on the host's clock
+      const arrived = performance.now();
+      arrivals.push({ t: arrived, late: Date.now() - timestamp / 1000 });
+      decodeStarts.set(timestamp, arrived);
       decoder.decode(new EncodedVideoChunk({
         type: keyframe ? "key" : "delta",
-        timestamp: Number(view.getBigUint64(2, true)),
+        timestamp,
         data: bytes.subarray(10),
       }));
     } else if (bytes[0] === PACKET.ACCEPTED) {
@@ -612,6 +637,7 @@
     return link.rtt_ms === null ? "" : `Round trip to ${who}: ${ms(link.rtt_ms)} ms`;
   }
 
+  window.__showCapabilities = () => showCapabilities(); // for tests
   async function showCapabilities() {
     const status = await invoke("view_capability_status").catch(() => null);
     const available = Boolean(status) && viewing;
@@ -645,18 +671,35 @@
     const now = performance.now();
     const drawn = totals.drawn - lastTick.drawn;
     const seconds = (now - lastTick.time) / 1000;
-    const latency = drawn > 0 ? (totals.latencyMsSum - lastTick.latencyMsSum) / drawn : null;
-    lastTick = { drawn: totals.drawn, latencyMsSum: totals.latencyMsSum, time: now };
+    const decoded = totals.decoded - lastTick.decoded;
+    const decodeMs = decoded > 0 ? (totals.decodeMsSum - lastTick.decodeMsSum) / decoded : null;
+    lastTick = { drawn: totals.drawn, decoded: totals.decoded, decodeMsSum: totals.decodeMsSum, time: now };
+
+    // Pictures that arrived in the last second, against the quickest recent
+    // one. Anything older than the window, and decode times never answered,
+    // are dropped so nothing grows.
+    while (arrivals.length > 0 && now - arrivals[0].t > RECENT_MS) arrivals.shift();
+    for (const [stamp, began] of decodeStarts) if (now - began > RECENT_MS) decodeStarts.delete(stamp);
+    const lately = arrivals.filter((a) => now - a.t <= 1000);
+    let later = null;
+    if (lately.length > 0) {
+      const quickest = Math.min(...arrivals.map((a) => a.late));
+      later = Math.max(0, lately.reduce((sum, a) => sum + a.late, 0) / lately.length - quickest);
+    }
+
     viewStats.classList.remove("error");
     viewStats.textContent =
       `${size.width}×${size.height} — ${(drawn / seconds).toFixed(1)} frames per second` +
-      (latency === null ? " (screen not changing)" : `, ${latency.toFixed(0)} ms from capture to display`) +
+      (drawn === 0 || decodeMs === null ? " (screen not changing)" : `, decoded in ${decodeMs.toFixed(0)} ms`) +
+      (later === null ? "" : `, pictures arriving ${later.toFixed(0)} ms later than the quickest of the last 10 s`) +
       (linkNote === "" ? "" : `. ${linkNote}`);
   }
+  window.__showViewStats = showViewStats; // for tests
 
   function endViewing(reason) {
     if (!viewing) return;
     viewing = false;
+    forgetTimings();
     forgetHeldInput();
     linkNote = "";
     clearInterval(statsTimer);
@@ -735,7 +778,8 @@
   async function connectNow(address) {
     forgetHeldInput();
     Object.keys(totals).forEach((key) => { totals[key] = 0; });
-    lastTick = { drawn: 0, latencyMsSum: 0, time: performance.now() };
+    lastTick = { drawn: 0, decoded: 0, decodeMsSum: 0, time: performance.now() };
+    forgetTimings();
 
     const token = ++connectionToken;
     const packets = new Channel();

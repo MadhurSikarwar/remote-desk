@@ -51,7 +51,10 @@ function createPage() {
   const fire = (id, type, event = {}) =>
     (el(id)._listeners[type] || []).forEach((fn) => fn({ preventDefault() {}, ...event }));
 
-  const page = { calls: [], handlers: {}, channels: [], el, fire, sleep, packet, PACKET, HOST, window: null };
+  const page = {
+    calls: [], handlers: {}, channels: [], el, fire, sleep, packet, PACKET, HOST, window: null,
+    decodeDelayMs: 0,
+  };
 
   class Channel {
     set onmessage(fn) { this._fn = fn; page.channels.push(this); }
@@ -64,16 +67,21 @@ function createPage() {
     return undefined;
   };
 
+  // A decoder that gives each picture back after `page.decodeDelayMs`.
   class VideoDecoder {
-    constructor() { this.decodeQueueSize = 0; }
-    configure() {} decode() {} close() {}
+    constructor(init) { this.init = init; this.decodeQueueSize = 0; }
+    configure() {}
+    decode(chunk) {
+      setTimeout(() => this.init.output({ timestamp: chunk.timestamp, close() {} }), page.decodeDelayMs);
+    }
+    close() {}
   }
   const sandbox = {
     document: {
       getElementById: el, querySelector: el, querySelectorAll: () => [],
       createElement: () => makeElement("created"), addEventListener() {}, body: makeElement("body"),
     },
-    VideoDecoder, EncodedVideoChunk: class {}, Channel,
+    VideoDecoder, EncodedVideoChunk: class { constructor(init) { Object.assign(this, init); } }, Channel,
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
     setTimeout, clearTimeout,
     // The window's polling timers are not run: tests drive the calls they care about.
@@ -92,6 +100,22 @@ function createPage() {
   page.inputs = () => page.calls.filter((c) => c.command === "view_send_input").map((c) => c.args.input);
   /** The packets of the newest connection come through here. */
   page.deliver = (bytes) => page.channels[page.channels.length - 1]._fn(bytes);
+  /** A picture packet whose capture time (on the host's clock) is `capturedAtMs`. */
+  page.frame = (capturedAtMs, keyframe = false) => {
+    const out = new Uint8Array(1 + 1 + 8 + 4);
+    out[0] = PACKET.FRAME;
+    out[1] = keyframe ? 1 : 0;
+    new DataView(out.buffer).setBigUint64(2, BigInt(Math.round(capturedAtMs * 1000)), true);
+    return out;
+  };
+  /** The size announcement that creates the decoder. */
+  page.config = (width = 640, height = 480) => {
+    const out = new Uint8Array(13);
+    out[0] = PACKET.CONFIG;
+    const view = new DataView(out.buffer);
+    view.setUint32(1, width, true); view.setUint32(5, height, true); view.setUint32(9, 30, true);
+    return out;
+  };
   /** Connects to `HOST` and has it allow the session and control. */
   page.connect = async ({ allowControl = true } = {}) => {
     page.handlers.view_connect = async () => HOST;

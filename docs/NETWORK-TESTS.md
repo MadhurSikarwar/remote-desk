@@ -29,6 +29,16 @@ Every number below is one run; none is a benchmark.
    what the server *sends*, which on a relay is both directions of the
    session.
 
+> **A note on "capture to display" figures.** The windows of the day showed
+> "N ms from capture to display", worked out from the host's capture time and
+> the viewer's own clock. In every test below both ends were on one computer,
+> so they shared a clock and the figures were right. Across two computers they
+> would not be, so the window no longer shows that figure (see
+> `docs/USER-GUIDE.md`); it shows decode time and "later than the quickest
+> recent picture" instead, which need no shared clock. The same applies to the
+> capture-to-display numbers in `MILESTONE-5.md`, `MILESTONE-6.md` and
+> `MILESTONE-9.md`.
+
 ## Results
 
 | Test | Result |

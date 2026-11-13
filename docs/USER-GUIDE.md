@@ -107,9 +107,13 @@ device". Then:
   when a file could not be marked). A file is reported as sent only after the receiving side has checked it and confirmed it arrived intact (if it never does, the transfer fails after a time limit and says so). Progress and the result are listed; either person can
   cancel.
 
-The status line under the picture shows the frame rate, the delay from
-capture to display, and the round trip to the other computer. "No answer
-from the host for N s" appears when it has gone quiet.
+The status line under the picture shows the frame rate; how long this
+computer takes to decode a picture; how much later pictures are arriving than
+the quickest of the last 10 seconds (a rise means the connection or the other
+computer is falling behind); and, separately, the round trip to the other
+computer. It does not show a "capture to display" time: that would compare
+two computers' clocks, which do not agree. "No answer from the host for N s"
+appears when it has gone quiet.
 
 ### If the connection drops
 
