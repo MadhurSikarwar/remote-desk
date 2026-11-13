@@ -9,9 +9,10 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
+use crate::rendezvous::ServerLink;
 use crate::share::{DisplaySummary, ShareController, ShareSettings, ShareStatus};
 use crate::state::{AppState, Status};
-use crate::viewer::{HostInfo, ViewerController, ViewerInput};
+use crate::viewer::{ConnectOptions, HostInfo, ViewerController, ViewerInput};
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> Status {
@@ -50,6 +51,8 @@ pub fn start_share(
         max_fps: config.video.max_fps,
         bitrate_kbps: config.video.max_bitrate_kbps,
         allow_input: config.security.allow_input,
+        server: ServerLink::from_config(&config.network)?,
+        advertised_port: None,
         allow_remote: config.network.allow_remote_connections,
         lan_discovery: config.network.lan_discovery,
         device_name: config.device.name,
@@ -114,15 +117,16 @@ pub fn view_connect(
         Some(hex) => Some(from_hex(&hex).ok_or("The device key is not valid")?),
         None => None,
     };
-    viewer.connect(
-        &address,
-        expected,
-        &state.config().device.name,
-        move |packet| {
-            // Fails only once the window is gone; the session ends with it.
-            let _ = packets.send(InvokeResponseBody::Raw(packet));
-        },
-    )
+    let config = state.config();
+    let options = ConnectOptions {
+        expected_key: expected,
+        server: ServerLink::from_config(&config.network)?,
+        policy: config.network.transport,
+    };
+    viewer.connect_with(&address, &options, &config.device.name, move |packet| {
+        // Fails only once the window is gone; the session ends with it.
+        let _ = packets.send(InvokeResponseBody::Raw(packet));
+    })
 }
 
 /// A device that answered a discovery query.

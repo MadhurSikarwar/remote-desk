@@ -12,13 +12,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use rc_core::config::TransportPolicy;
 use rc_crypto::channel::Side;
-use rc_crypto::{fingerprint, PublicKey};
+use rc_crypto::{fingerprint, fingerprint_bytes, parse_fingerprint, Identity, PublicKey};
 use rc_input::keymap::scancode_for;
 use rc_protocol::{InputEvent, Message, MouseButton, Role};
+use rc_rendezvous::DeviceId;
 use serde::{Deserialize, Serialize};
 
-use crate::secure::{establish, exchange_hello, lock, SecureWriter, Security};
+use crate::rendezvous::{reach, Route, ServerLink};
+use crate::secure::{establish, exchange_hello, lock, Peer, SecureReader, SecureWriter, Security};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -192,6 +195,91 @@ pub struct HostInfo {
     pub fingerprint: String,
     /// Must match the code on the host's screen.
     pub auth_code: String,
+    /// How the host was reached: directly, or through the server.
+    pub route: String,
+}
+
+/// What to do besides connecting to a plain address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectOptions {
+    /// The key a discovery reply announced for the device at the address.
+    pub expected_key: Option<PublicKey>,
+    /// The server to reach devices by ID through.
+    pub server: Option<ServerLink>,
+    /// Whether to connect directly, through the server, or either.
+    pub policy: TransportPolicy,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            expected_key: None,
+            server: None,
+            policy: TransportPolicy::Auto,
+        }
+    }
+}
+
+/// What the user asked to connect to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// `host:port`, or a bare port on this computer.
+    Address(String),
+    /// A device's ID: its 16-digit key fingerprint.
+    Device(DeviceId),
+}
+
+/// Tells a device ID from an address. An ID is 16 hex digits, optionally
+/// grouped; anything with a `:` is an address, and so is a bare port.
+pub fn parse_target(text: &str) -> Target {
+    let text = text.trim();
+    if !text.contains(':') {
+        if let Some(id) = parse_fingerprint(text) {
+            return Target::Device(id);
+        }
+    }
+    Target::Address(text.to_owned())
+}
+
+/// What a connection must prove about the device at the other end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pin {
+    Nothing,
+    Key(PublicKey),
+    Id(DeviceId),
+}
+
+/// Completes the encrypted handshake on `stream` and checks the device is
+/// the one asked for.
+fn handshake_checked(
+    stream: &TcpStream,
+    identity: &Identity,
+    pin: Pin,
+    place: &str,
+) -> Result<(SecureWriter, SecureReader, Peer), String> {
+    let (writer, reader, peer) = establish(stream, identity, Side::Initiator)
+        .map_err(|e| format!("could not set up a secure connection: {e}"))?;
+    let mismatch = match pin {
+        Pin::Nothing => None,
+        Pin::Key(expected) => (expected != peer.public).then(|| {
+            format!(
+                "The device at {place} is not the one you picked: it has key {} but {} was expected",
+                peer.fingerprint,
+                fingerprint(&expected)
+            )
+        }),
+        Pin::Id(expected) => (expected != fingerprint_bytes(&peer.public)).then(|| {
+            format!(
+                "The device reached {place} is not the one with that ID: it has key {}",
+                peer.fingerprint
+            )
+        }),
+    };
+    if let Some(message) = mismatch {
+        writer.shutdown();
+        return Err(message);
+    }
+    Ok((writer, reader, peer))
 }
 
 struct Connection {
@@ -224,10 +312,32 @@ impl ViewerController {
     /// connection is dropped if the device that answers holds a different
     /// one, so a viewer does not end up with whoever happens to be at an
     /// address.
+    #[cfg(test)]
     pub fn connect<F>(
         &self,
         address: &str,
         expected_key: Option<PublicKey>,
+        device_name: &str,
+        sink: F,
+    ) -> Result<HostInfo, String>
+    where
+        F: Fn(Vec<u8>) + Send + 'static,
+    {
+        let options = ConnectOptions {
+            expected_key,
+            ..ConnectOptions::default()
+        };
+        self.connect_with(address, &options, device_name, sink)
+    }
+
+    /// As [`connect`](Self::connect), and `target` may also be a device ID
+    /// (see [`parse_target`]), which is reached through the server in
+    /// `options`: directly if possible, relayed if not, as the policy
+    /// allows.
+    pub fn connect_with<F>(
+        &self,
+        target: &str,
+        options: &ConnectOptions,
         device_name: &str,
         sink: F,
     ) -> Result<HostInfo, String>
@@ -243,25 +353,44 @@ impl ViewerController {
             return Err("Already viewing a screen".to_owned());
         }
 
-        let target = resolve_address(address)?;
-        let stream = TcpStream::connect_timeout(&target, CONNECT_TIMEOUT)
-            .map_err(|e| format!("cannot connect to {target}: {e}"))?;
-        let (writer, mut reader, peer) =
-            establish(&stream, security.identity(), Side::Initiator)
-                .map_err(|e| format!("could not set up a secure connection: {e}"))?;
-        if let Some(expected) = expected_key.filter(|key| *key != peer.public) {
-            writer.shutdown();
-            return Err(format!(
-                "The device at {target} is not the one you picked: it has key {} but {} was expected",
-                peer.fingerprint,
-                fingerprint(&expected)
-            ));
-        }
+        let (label, (writer, mut reader, peer), route) = match parse_target(target) {
+            Target::Address(text) => {
+                let address = resolve_address(&text)?;
+                let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
+                    .map_err(|e| format!("cannot connect to {address}: {e}"))?;
+                let pin = options.expected_key.map_or(Pin::Nothing, Pin::Key);
+                let session =
+                    handshake_checked(&stream, security.identity(), pin, &address.to_string())?;
+                (address.to_string(), session, Route::Direct)
+            }
+            Target::Device(id) => {
+                let link = options.server.as_ref().ok_or(
+                    "A device ID needs a server. Set one in the settings (Network), with its key fingerprint",
+                )?;
+                let (session, route) = reach(
+                    link,
+                    security.identity(),
+                    id,
+                    device_name,
+                    options.policy,
+                    |stream, route| {
+                        handshake_checked(
+                            &stream,
+                            security.identity(),
+                            Pin::Id(id),
+                            route.describe(),
+                        )
+                    },
+                )?;
+                (format!("device {}", target.trim()), session, route)
+            }
+        };
         let name = exchange_hello(&writer, &mut reader, Role::Viewer, device_name)?;
         let host = HostInfo {
             name,
             fingerprint: peer.fingerprint,
             auth_code: peer.auth_code,
+            route: route.describe().to_owned(),
         };
 
         let writer = Arc::new(writer);
@@ -300,7 +429,8 @@ impl ViewerController {
         };
 
         tracing::info!(
-            %target,
+            target = label,
+            route = host.route,
             host = host.name,
             fingerprint = host.fingerprint,
             "connected; waiting for the host to allow viewing"
