@@ -74,7 +74,7 @@ string scan proves presence of text, not that a code path is used.
 |---|---|---|
 | Custom box/secretbox handshake | Noise protocol (`snow`), mutual static keys | Reviewed, formally analysed handshake instead of a bespoke one; forward secrecy |
 | Salted password + challenge hash | Approval at the host for every session, a code both people compare, remembered device keys (see `MILESTONE-5.md`) | No password to capture or brute-force; consent is explicit |
-| KCP + TCP + WebRTC + WebSocket | QUIC (`quinn`) for direct paths, TLS/WebSocket on 443 for relay | Two transports cover the same ground with far less code |
+| KCP + TCP + WebRTC + WebSocket | Plain TCP with the Noise protocol: direct when reachable, relayed through one server otherwise (see `MILESTONE-7.md`). QUIC hole punching and TLS/WebSocket wrapping remain to do | One transport, far less code; works wherever outbound TCP does |
 | FFmpeg hardware encoders + libvpx | Media Foundation H.264 (hardware when present), software fallback | No bundled GPL/LGPL codec binaries; ships with Windows |
 | Flutter | Tauri 2 + WebView2 | Requested stack; small installer; WebCodecs gives hardware decode |
 | Unattended access as a service | Not in scope until explicitly designed | Attended, consent-first product |
