@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# An exact version, so the same source builds with the same compiler and
+# lints everywhere and at any time. Raise it on purpose.
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

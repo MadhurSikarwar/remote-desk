@@ -126,7 +126,9 @@ pub struct SecurityConfig {
     pub allow_input: bool,
     pub allow_clipboard: bool,
     pub allow_file_transfer: bool,
-    /// End a session after this much inactivity; 0 disables the limit.
+    /// Meant to end a session after this much inactivity (0 for no limit).
+    /// **Not implemented: nothing reads this yet.** Kept so existing
+    /// settings files stay valid.
     pub idle_timeout_minutes: u32,
 }
 

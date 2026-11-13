@@ -7,11 +7,12 @@
 # printed in the log. Keep that volume: a new key means every device has to
 # be given the new fingerprint.
 
-FROM rust:1-bookworm AS build
+# The compiler version is the one in rust-toolchain.toml (keep them equal).
+FROM rust:1.99.1-bookworm AS build
 WORKDIR /src
 COPY . .
-# The pinned toolchain file asks for extra components the image does not
-# carry; the image's own stable compiler is used instead.
+# The toolchain file also asks for rustfmt and clippy, which a build does not
+# need; the image's own compiler of the same version is used instead.
 RUN rm -f rust-toolchain.toml \
  && cargo build --release --locked -p rc-server
 
