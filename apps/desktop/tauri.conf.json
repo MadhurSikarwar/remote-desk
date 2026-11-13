@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Remote Desk",
+  "productName": "Prometheus",
   "version": "0.1.0",
-  "identifier": "dev.remotedesk.desktop",
+  "identifier": "dev.prometheus.desktop",
   "build": {
     "frontendDist": "./ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Remote Desk",
+        "title": "Prometheus",
         "width": 920,
         "height": 680,
         "minWidth": 640,

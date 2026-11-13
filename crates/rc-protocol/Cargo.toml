@@ -1,6 +1,6 @@
 [package]
 name = "rc-protocol"
-description = "Wire messages exchanged between Remote Desk devices"
+description = "Wire messages exchanged between Prometheus devices"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

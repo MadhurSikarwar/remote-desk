@@ -1,6 +1,6 @@
 [package]
 name = "rc-input"
-description = "Mouse and keyboard injection for Remote Desk"
+description = "Mouse and keyboard injection for Prometheus"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

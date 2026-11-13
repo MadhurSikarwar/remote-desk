@@ -1,6 +1,6 @@
 [package]
 name = "rc-net"
-description = "Finding Remote Desk devices on the local network"
+description = "Finding Prometheus devices on the local network"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

@@ -14,7 +14,7 @@ use rc_crypto::Identity;
 use rc_server::{Config, Limits, Server};
 
 const USAGE: &str = "\
-rc-server: rendezvous and relay server for Remote Desk
+rc-server: rendezvous and relay server for Prometheus
 
 Usage: rc-server [--listen ADDR:PORT] [--data-dir DIR]
 

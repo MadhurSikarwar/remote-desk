@@ -1,6 +1,6 @@
 [package]
 name = "rc-capture"
-description = "Screen capture for Remote Desk (DXGI Desktop Duplication)"
+description = "Screen capture for Prometheus (DXGI Desktop Duplication)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

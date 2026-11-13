@@ -8,7 +8,7 @@
 # a throwaway machine (CI); on your own PC it will replace an installed copy.
 param(
     [Parameter(Mandatory = $true)][string]$Installer,
-    [string]$ProductName = 'Remote Desk'
+    [string]$ProductName = 'Prometheus'
 )
 $ErrorActionPreference = 'Stop'
 
@@ -34,20 +34,20 @@ function AutostartTraces {
         $values = Get-ItemProperty $key -ErrorAction SilentlyContinue
         if ($values) {
             $values.PSObject.Properties |
-                Where-Object { $_.Name -notlike 'PS*' -and "$($_.Name) $($_.Value)" -match 'Remote Desk|rc-desktop' } |
+                Where-Object { $_.Name -notlike 'PS*' -and "$($_.Name) $($_.Value)" -match 'Prometheus|rc-desktop' } |
                 ForEach-Object { $found += "$key\$($_.Name)" }
         }
     }
     foreach ($folder in [Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup')) {
         Get-ChildItem $folder -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match 'Remote Desk|rc-desktop' } |
+            Where-Object { $_.Name -match 'Prometheus|rc-desktop' } |
             ForEach-Object { $found += $_.FullName }
     }
     Get-ScheduledTask -ErrorAction SilentlyContinue |
-        Where-Object { "$($_.TaskName) $($_.Actions.Execute)" -match 'Remote Desk|rc-desktop' } |
+        Where-Object { "$($_.TaskName) $($_.Actions.Execute)" -match 'Prometheus|rc-desktop' } |
         ForEach-Object { $found += "scheduled task $($_.TaskName)" }
     Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
-        Where-Object { "$($_.Name) $($_.PathName)" -match 'Remote Desk|rc-desktop' } |
+        Where-Object { "$($_.Name) $($_.PathName)" -match 'Prometheus|rc-desktop' } |
         ForEach-Object { $found += "service $($_.Name)" }
     $found
 }
@@ -121,7 +121,7 @@ if ($autostart.Count -gt 0) { Fail "left behind after uninstalling: $($autostart
 
 # What stays is the user's own data, which the silent uninstall does not touch.
 $data = Get-ChildItem $env:APPDATA, $env:LOCALAPPDATA -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match 'Remote ?Desk|remotedesk|rc-desktop' }
+    Where-Object { $_.Name -match 'Prometheus|prometheus|rc-desktop' }
 $left = if ($data) { ($data | ForEach-Object { $_.FullName.Replace($env:USERPROFILE, '~') }) -join ', ' } else { 'nothing' }
 Note 'Uninstalled' "application, uninstall entry and shortcuts are gone; left in the user's profile: $left"
 Write-Host 'installer test passed'

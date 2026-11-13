@@ -1,6 +1,6 @@
 [package]
 name = "rc-clipboard"
-description = "Clipboard text synchronisation for Remote Desk"
+description = "Clipboard text synchronisation for Prometheus"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

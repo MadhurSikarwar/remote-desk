@@ -1,4 +1,4 @@
-//! Shared foundation for Remote Desk: configuration, file locations and
+//! Shared foundation for Prometheus: configuration, file locations and
 //! structured logging. Nothing in this crate touches the screen, the network
 //! or input devices.
 

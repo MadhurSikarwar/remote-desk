@@ -8,7 +8,7 @@
 # The key lives in /var/lib/rc-server (kept across restarts and upgrades).
 
 [Unit]
-Description=Remote Desk rendezvous and relay server
+Description=Prometheus rendezvous and relay server
 After=network-online.target
 Wants=network-online.target
 

@@ -1,6 +1,6 @@
 [package]
 name = "rc-crypto"
-description = "Device identity, encrypted channel and trusted devices for Remote Desk"
+description = "Device identity, encrypted channel and trusted devices for Prometheus"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

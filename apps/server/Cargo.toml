@@ -1,6 +1,6 @@
 [package]
 name = "rc-server"
-description = "Rendezvous and relay server for Remote Desk"
+description = "Rendezvous and relay server for Prometheus"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

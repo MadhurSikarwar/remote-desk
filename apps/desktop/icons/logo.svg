@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512" role="img" aria-label="Prometheus">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgb(24, 18, 58)"/><stop offset="1" stop-color="rgb(6, 8, 22)"/></linearGradient>
+    <linearGradient id="fire" gradientUnits="userSpaceOnUse" x1="0" y1="21" x2="0" y2="81"><stop offset="0.0" stop-color="rgb(255, 224, 90)"/><stop offset="0.5" stop-color="rgb(255, 140, 30)"/><stop offset="1.0" stop-color="rgb(230, 58, 40)"/></linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <rect width="100" height="100" rx="22" fill="url(#bg)"/>
+  <g fill="rgb(255, 120, 30)" opacity="0.65" filter="url(#glow)"><rect x="15" y="21" width="70" height="18" rx="5"/><rect x="26" y="21" width="16" height="60" rx="5"/><rect x="58" y="21" width="16" height="60" rx="5"/></g>
+  <g fill="url(#fire)"><rect x="15" y="21" width="70" height="18" rx="5"/><rect x="26" y="21" width="16" height="60" rx="5"/><rect x="58" y="21" width="16" height="60" rx="5"/></g>
+</svg>

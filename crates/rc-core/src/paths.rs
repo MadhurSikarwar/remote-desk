@@ -25,13 +25,13 @@ pub struct AppPaths {
 
 impl AppPaths {
     /// Uses `RC_CONFIG_DIR` when set, otherwise the platform's per-user
-    /// locations (`%APPDATA%\RemoteDesk` and `%LOCALAPPDATA%\RemoteDesk`
+    /// locations (`%APPDATA%\Prometheus` and `%LOCALAPPDATA%\Prometheus`
     /// on Windows).
     pub fn resolve() -> Result<Self, PathError> {
         if let Some(base) = std::env::var_os(CONFIG_DIR_ENV).filter(|v| !v.is_empty()) {
             return Ok(Self::from_base(Path::new(&base)));
         }
-        let dirs = ProjectDirs::from("", "", "RemoteDesk").ok_or(PathError::NoHomeDirectory)?;
+        let dirs = ProjectDirs::from("", "", "Prometheus").ok_or(PathError::NoHomeDirectory)?;
         Ok(Self {
             config_dir: dirs.config_dir().to_path_buf(),
             log_dir: dirs.data_local_dir().join("logs"),

@@ -1,4 +1,4 @@
-# Remote Desk — architecture
+# Prometheus — architecture
 
 Status: design baseline, written before any code was compiled. Statements are
 labelled **[verified]** (read or run during the study) or **[design]** (a

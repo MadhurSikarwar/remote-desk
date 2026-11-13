@@ -1,4 +1,6 @@
-# Remote Desk
+<p align="center"><img src="apps/desktop/icons/logo.svg" width="128" alt="Prometheus logo: the Greek letter Pi in fire colours"></p>
+
+# Prometheus
 
 A remote-desktop application for Windows, inspired by RustDesk, built around
 one rule: **the person at the shared computer decides, every time.** Rust,
@@ -13,12 +15,15 @@ or the internet**, has had **no independent security review**, and the
 installer is **not code-signed**. Read `docs/SECURITY.md` before relying on
 it.
 
-*Named "Remote Control" until the end of Milestone 10; the milestone records
-in `docs/` still use that name for what they measured. Settings and keys
-now live in `%APPDATA%\RemoteDesk` (a copy made under the old name is not
-picked up), and received files go to `Downloads\Remote Desk`. The labels
-inside the key and handshake derivations still say "RemoteControl" on
-purpose: changing them would change what identities and codes compute.*
+*Prometheus (Προμηθεύς), who took fire from the gods and gave it to people.
+The logo is his initial, **Π**. The project was called "Remote Control" for
+Milestones 1 to 10, and the milestone records in `docs/` still use that name
+for what they measured. Settings and keys now live in `%APPDATA%\Prometheus`
+(a copy made under an older name is not picked up) and received files go to
+`Downloads\Prometheus`. The labels inside the key and handshake derivations
+still say "RemoteControl" on purpose: changing them would change what
+identities and codes compute. (Not to be confused with the Prometheus
+monitoring system, which is unrelated.)*
 
 ## What it does
 

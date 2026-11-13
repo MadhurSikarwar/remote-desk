@@ -1,6 +1,6 @@
 [package]
 name = "rc-desktop"
-description = "Remote Desk desktop application"
+description = "Prometheus desktop application"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

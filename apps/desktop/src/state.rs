@@ -105,9 +105,9 @@ impl AppState {
     /// there is no Downloads.
     pub fn received_folder(&self) -> std::path::PathBuf {
         directories::UserDirs::new()
-            .and_then(|dirs| dirs.download_dir().map(|d| d.join("Remote Desk")))
+            .and_then(|dirs| dirs.download_dir().map(|d| d.join("Prometheus")))
             .or_else(|| self.paths.as_ref().map(|p| p.config_dir.join("received")))
-            .unwrap_or_else(|| std::path::PathBuf::from("Remote Desk"))
+            .unwrap_or_else(|| std::path::PathBuf::from("Prometheus"))
     }
 
     pub fn security(&self) -> Option<Arc<Security>> {

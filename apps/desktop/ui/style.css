@@ -364,3 +364,13 @@ button:disabled {
   display: block;
   color: var(--text);
 }
+
+header .logo {
+  border-radius: 10px;
+  margin-right: 12px;
+  flex: none;
+}
+
+header .title {
+  flex: 1;
+}

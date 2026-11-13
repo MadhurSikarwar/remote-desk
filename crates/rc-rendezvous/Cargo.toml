@@ -1,6 +1,6 @@
 [package]
 name = "rc-rendezvous"
-description = "Messages between devices and a Remote Desk rendezvous server"
+description = "Messages between devices and a Prometheus rendezvous server"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

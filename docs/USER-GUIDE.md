@@ -1,6 +1,6 @@
-# Remote Desk: user guide
+# Prometheus: user guide
 
-Remote Desk lets you see another computer's screen, and, if its owner
+Prometheus lets you see another computer's screen, and, if its owner
 allows it, use its mouse and keyboard, copy text and send files. The person
 at the shared computer decides every time. Nothing starts by itself, nothing
 runs in the background, and closing the window ends sharing.
@@ -9,7 +9,7 @@ runs in the background, and closing the window ends sharing.
 
 Run `Remote Desk_<version>_x64-setup.exe`. It installs **for your user
 only**, needs no administrator rights, installs into
-`%LOCALAPPDATA%\Remote Desk`, and adds a shortcut in the Start menu and
+`%LOCALAPPDATA%\Prometheus`, and adds a shortcut in the Start menu and
 one on the Desktop (delete either freely).
 It does not set the app to start with Windows, and does not install a
 service. If Windows' WebView2 component is missing (it is part of current
@@ -22,14 +22,14 @@ all. Check the file against the SHA-256 checksum published with it
 Smart App Control off is a system setting that is yours to decide; this
 project does not ask you to. See `docs/RELEASING.md` for why it is unsigned.
 
-To uninstall: Settings → Apps → Remote Desk, or run the uninstaller in the
+To uninstall: Settings → Apps → Prometheus, or run the uninstaller in the
 install folder. Your settings and keys stay (see "Where things are") so that
 reinstalling keeps the same device identity; delete the folders to remove
 them. The web view the window runs in also keeps its own data in
-`%LOCALAPPDATA%\dev.remotedesk.desktop`. A silent test uninstall on a clean
+`%LOCALAPPDATA%\dev.prometheus.desktop`. A silent test uninstall on a clean
 machine removed the program, its uninstall entry and both shortcuts, and
-left exactly three folders: `%APPDATA%\RemoteDesk`,
-`%LOCALAPPDATA%\RemoteDesk` and `%LOCALAPPDATA%\dev.remotedesk.desktop`.
+left exactly three folders: `%APPDATA%\Prometheus`,
+`%LOCALAPPDATA%\Prometheus` and `%LOCALAPPDATA%\dev.prometheus.desktop`.
 
 ## The two halves
 
@@ -100,7 +100,7 @@ device". Then:
   managers do this) is never sent. Text only; no images or files.
 - *Send a file to the host / to the viewer*: the receiving person is asked
   for each file, with its name and size. Files are saved in
-  `Downloads\Remote Desk`, never overwrite another file, are limited to
+  `Downloads\Prometheus`, never overwrite another file, are limited to
   2 GiB, and are marked as downloaded from the internet so Windows warns
   before you run them. Progress and the result are listed; either person can
   cancel.
@@ -150,11 +150,11 @@ clipboard and files off, other computers off.
 
 | What | Where |
 |---|---|
-| Settings | `%APPDATA%\RemoteDesk\config\config.toml` (the window shows the exact path) |
+| Settings | `%APPDATA%\Prometheus\config\config.toml` (the window shows the exact path) |
 | This device's key | `identity.key` next to it, **encrypted with your Windows account** (DPAPI): another account, or the file copied to another PC, cannot use it |
 | Remembered devices | `trusted.toml` next to it |
-| Logs | `%LOCALAPPDATA%\RemoteDesk\data\logs`, one file per day, kept 14 days by default. They name devices, keys, addresses, when sessions began and ended and the size of files, never the screen, input, clipboard text or file names and contents |
-| Received files | `Downloads\Remote Desk` |
+| Logs | `%LOCALAPPDATA%\Prometheus\data\logs`, one file per day, kept 14 days by default. They name devices, keys, addresses, when sessions began and ended and the size of files, never the screen, input, clipboard text or file names and contents |
+| Received files | `Downloads\Prometheus` |
 | The environment variable `RC_CONFIG_DIR` | Keeps settings, key and logs under one folder instead (for testing) |
 
 Deleting `identity.key` gives the computer a new identity: devices that
