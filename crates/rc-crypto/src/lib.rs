@@ -15,7 +15,9 @@ mod identity;
 mod protect;
 mod trust;
 
-pub use identity::{fingerprint, from_hex, to_hex, Identity, PublicKey};
+pub use identity::{
+    fingerprint, fingerprint_bytes, from_hex, parse_fingerprint, to_hex, Identity, PublicKey,
+};
 pub use trust::{TrustStore, TrustedDevice};
 
 #[derive(Debug, thiserror::Error)]

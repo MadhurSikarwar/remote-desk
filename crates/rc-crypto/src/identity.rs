@@ -16,6 +16,8 @@ pub type PublicKey = [u8; KEY_LEN];
 
 /// File format marker, in case the layout ever changes.
 const MAGIC: &[u8; 8] = b"RCIDENT1";
+/// Marks a key file that is stored without Windows protection.
+const MAGIC_PLAIN: &[u8; 8] = b"RCSRVID1";
 
 /// A public key as 64 lowercase hex digits.
 pub fn to_hex(key: &PublicKey) -> String {
@@ -44,6 +46,30 @@ pub fn fingerprint(public: &PublicKey) -> String {
         .map(|pair| format!("{:02X}{:02X}", pair[0], pair[1]))
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// The raw bytes behind [`fingerprint`]: the first 8 bytes of the key's
+/// SHA-256. Used as a device's ID for lookups.
+pub fn fingerprint_bytes(public: &PublicKey) -> [u8; 8] {
+    let digest = Sha256::digest(public);
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&digest[..8]);
+    out
+}
+
+/// Reads a fingerprint as people type and paste it: 16 hex digits, in any
+/// case, with dashes, spaces or nothing between the groups. `None` for
+/// anything else.
+pub fn parse_fingerprint(text: &str) -> Option<[u8; 8]> {
+    let digits: String = text.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    if digits.len() != 16 || !digits.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 8];
+    for (byte, pair) in out.iter_mut().zip(digits.as_bytes().chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// This device's key pair. The private half never leaves this type except
@@ -106,6 +132,54 @@ impl Identity {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 let identity = Self::generate()?;
                 identity.save(path)?;
+                Ok(identity)
+            }
+            Err(e) => Err(io_error(path)(e)),
+        }
+    }
+
+    /// Like [`Identity::load_or_create`], but stores the key **unencrypted**,
+    /// protected only by the file's permissions (owner read/write on Unix).
+    /// For a server, which runs unattended and, on Linux, has no per-user
+    /// encryption to rely on. Never use it for a personal device.
+    pub fn load_or_create_unprotected(path: &Path) -> Result<Self, CryptoError> {
+        match fs::read(path) {
+            Ok(bytes) => {
+                let malformed = |reason: &str| CryptoError::Malformed {
+                    path: path.to_path_buf(),
+                    reason: reason.to_owned(),
+                };
+                let body = bytes
+                    .strip_prefix(MAGIC_PLAIN)
+                    .ok_or_else(|| malformed("not a server key file"))?;
+                let (private, public) = body
+                    .split_at_checked(KEY_LEN)
+                    .filter(|(_, public)| public.len() == KEY_LEN)
+                    .ok_or_else(|| malformed("unexpected key length"))?;
+                let mut identity = Self {
+                    private: [0; KEY_LEN],
+                    public: [0; KEY_LEN],
+                };
+                identity.private.copy_from_slice(private);
+                identity.public.copy_from_slice(public);
+                Ok(identity)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let identity = Self::generate()?;
+                let mut bytes = MAGIC_PLAIN.to_vec();
+                bytes.extend_from_slice(&identity.private);
+                bytes.extend_from_slice(&identity.public);
+                if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                    fs::create_dir_all(dir).map_err(io_error(path))?;
+                }
+                let mut options = fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+                let mut file = options.open(path).map_err(io_error(path))?;
+                file.write_all(&bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(io_error(path))?;
                 Ok(identity)
             }
             Err(e) => Err(io_error(path)(e)),
@@ -191,6 +265,56 @@ mod tests {
             &"é".repeat(32),
         ] {
             assert_eq!(from_hex(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn fingerprint_bytes_match_the_text_form_and_parse_back() {
+        let key: PublicKey = std::array::from_fn(|i| (i * 3) as u8);
+        let text = fingerprint(&key);
+        let bytes = fingerprint_bytes(&key);
+        assert_eq!(parse_fingerprint(&text), Some(bytes));
+        // As people type it.
+        assert_eq!(parse_fingerprint(&text.to_lowercase()), Some(bytes));
+        assert_eq!(parse_fingerprint(&text.replace('-', "")), Some(bytes));
+        assert_eq!(parse_fingerprint(&text.replace('-', " ")), Some(bytes));
+        assert_eq!(parse_fingerprint(&format!("  {text}  ")), Some(bytes));
+    }
+
+    #[test]
+    fn malformed_fingerprints_are_rejected() {
+        for bad in [
+            "",
+            "6668",
+            "6668-7AAD-F862-BD7",
+            "6668-7AAD-F862-BD77-00",
+            "6668-7AAD-F862-BDZZ",
+            "６６６８-7AAD-F862-BD77",
+            "127.0.0.1:5000",
+        ] {
+            assert_eq!(parse_fingerprint(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_server_key_is_created_once_reloaded_and_never_replaced_when_damaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("server.key");
+        let first = Identity::load_or_create_unprotected(&path).unwrap();
+        let again = Identity::load_or_create_unprotected(&path).unwrap();
+        assert_eq!(first.public(), again.public());
+        assert_eq!(first.private(), again.private());
+
+        // A personal key file is not accepted as a server key, and the
+        // other way round.
+        let personal = dir.path().join("personal.key");
+        fs::write(&personal, b"RCIDENT1 something").unwrap();
+        assert!(Identity::load_or_create_unprotected(&personal).is_err());
+
+        for damage in [&b"junk"[..], &b"RCSRVID1 too short"[..], &[][..]] {
+            fs::write(&path, damage).unwrap();
+            assert!(Identity::load_or_create_unprotected(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), damage, "file was replaced");
         }
     }
 
