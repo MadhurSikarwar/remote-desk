@@ -85,7 +85,8 @@
         case "waiting_for_peer":
           li.append(document.createTextNode("waiting for the other side to accept…"), button("Cancel", () => cancel(item), true));
           break;
-        case "transferring": {
+        case "transferring":
+        case "awaiting_confirmation": {
           const bar = document.createElement("progress");
           bar.max = Math.max(item.size, 1);
           bar.value = item.done;
@@ -127,7 +128,22 @@
         await invoke("transfer_chunk", bytes, { headers: { "x-role": role, "x-id": String(id) } });
       }
       await invoke("transfer_finish", { role, id });
-      note.textContent = `Sent ${file.name}.`;
+      // Every byte has gone, but that is not the same as the file having
+      // arrived intact: it is delivered when the other side says so.
+      note.textContent = `${file.name}: all of it has been sent; waiting for the other side to confirm it arrived…`;
+      const confirmed_by = Date.now() + 20 * 60_000; // the program fails it much sooner; this only ends the polling
+      for (;;) {
+        const status = await invoke("transfer_status", { role });
+        const item = status.items.find((i) => i.direction === "outgoing" && i.id === id);
+        if (!item) throw new Error("The transfer disappeared before it was confirmed");
+        if (item.state === "finished") break;
+        if (["refused", "cancelled", "failed"].includes(item.state)) {
+          throw new Error(item.detail ?? "The other side did not confirm that the file arrived");
+        }
+        if (Date.now() > confirmed_by) throw new Error("The other side never confirmed that the file arrived");
+        await sleep(300);
+      }
+      note.textContent = `Sent ${file.name}; the other side confirmed it arrived intact.`;
     } catch (error) {
       note.textContent = `${file.name}: ${message(error)}`;
       if (id !== undefined) invoke("transfer_cancel", { role, direction: "outgoing", id }).catch(() => {});

@@ -51,7 +51,7 @@ function createPage() {
   const fire = (id, type, event = {}) =>
     (el(id)._listeners[type] || []).forEach((fn) => fn({ preventDefault() {}, ...event }));
 
-  const page = { calls: [], handlers: {}, channels: [], el, fire, sleep, packet, PACKET, HOST };
+  const page = { calls: [], handlers: {}, channels: [], el, fire, sleep, packet, PACKET, HOST, window: null };
 
   class Channel {
     set onmessage(fn) { this._fn = fn; page.channels.push(this); }
@@ -81,6 +81,7 @@ function createPage() {
     performance, TextDecoder, TextEncoder, console, Date,
   };
   sandbox.window = sandbox;
+  page.window = sandbox;
   sandbox.__TAURI__ = { core: { invoke, Channel } };
   vm.createContext(sandbox);
   // The reconnect policy is a script of its own, loaded before session.js.

@@ -772,3 +772,81 @@ fn a_lookup_finds_the_newest_entry_with_a_number() {
     let found = inner.find(Direction::Incoming, 9).unwrap();
     assert_eq!(found.detail.as_deref(), Some("new"));
 }
+
+/// Sends all of `data` from A but delivers nothing to B afterwards.
+fn send_without_delivering_the_end(pair: &Pair, id: u32, data: &[u8]) {
+    for piece in data.chunks(200_000) {
+        pair.a.chunk(id, piece).unwrap();
+    }
+    pair.pump(); // the chunks arrive
+    pair.a.finish(id).unwrap(); // the end stays in the queue
+}
+
+#[test]
+fn the_sender_is_not_told_it_is_finished_until_the_receiver_confirms() {
+    let pair = Pair::new(true, true);
+    let content = data(300_000);
+    let id = pair.offer_and_accept("proof.bin", content.len() as u64);
+    send_without_delivering_the_end(&pair, id, &content);
+
+    let waiting = item(&pair.a);
+    assert_eq!(waiting.state, State::AwaitingConfirmation);
+    assert_eq!(
+        waiting.detail.as_deref(),
+        Some("waiting for the other side to confirm")
+    );
+
+    pair.pump(); // the receiver checks the file and confirms
+    let done = item(&pair.a);
+    assert_eq!(done.state, State::Finished);
+    assert_eq!(done.detail.as_deref(), Some("delivered"));
+}
+
+#[test]
+fn a_receiver_that_reports_a_damaged_file_leaves_the_sender_failed_with_the_reason() {
+    let pair = Pair::new(true, true);
+    let content = data(300_000);
+    let id = pair.offer_and_accept("bad.bin", content.len() as u64);
+    send_without_delivering_the_end(&pair, id, &content);
+    // The hash in the end message is wrong by the time it arrives.
+    for message in lock(&pair.to_b).iter_mut() {
+        if let Message::FileEnd { sha256, .. } = message {
+            *sha256 = [0u8; 32];
+        }
+    }
+    pair.pump();
+
+    let sent = item(&pair.a);
+    assert_ne!(sent.state, State::Finished);
+    assert!(
+        sent.detail.as_deref().unwrap_or("").contains("damaged"),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn a_receiver_that_never_confirms_fails_the_transfer_after_a_time_limit() {
+    let mut pair = Pair::new(true, true);
+    pair.a.set_confirm_timeout(Duration::from_millis(100));
+    let content = data(1_000);
+    let id = pair.offer_and_accept("silent.bin", content.len() as u64);
+    send_without_delivering_the_end(&pair, id, &content);
+    assert_eq!(item(&pair.a).state, State::AwaitingConfirmation);
+
+    std::thread::sleep(Duration::from_millis(250));
+    let sent = item(&pair.a);
+    assert_eq!(sent.state, State::Failed);
+    assert!(sent.detail.unwrap().contains("did not confirm"));
+    // The receiver is told to let go of the file.
+    assert!(lock(&pair.to_b)
+        .iter()
+        .any(|m| matches!(m, Message::FileCancel { id: i, by_sender: true, .. } if *i == id)));
+}
+
+#[test]
+fn a_done_message_before_the_end_does_not_finish_anything() {
+    let pair = Pair::new(true, true);
+    let id = pair.offer_and_accept("early.bin", 10);
+    pair.a.handle(&Message::FileDone { id });
+    assert_eq!(pair.a.outgoing_state(id), Some(State::Transferring));
+}

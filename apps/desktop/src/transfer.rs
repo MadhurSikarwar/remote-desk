@@ -39,6 +39,11 @@ use crate::secure::lock;
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// How long an offer waits for the receiving person.
 pub const OFFER_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a sender waits for the receiver's confirmation after the last
+/// byte: the receiver still has to check the file and write it to disk.
+const CONFIRM_BASE: Duration = Duration::from_secs(60);
+/// Added for every MiB of the file, since saving a big file takes longer.
+const CONFIRM_PER_MIB: Duration = Duration::from_millis(40);
 /// Offers waiting for a decision, plus files being received.
 const MAX_INCOMING: usize = 4;
 /// Files being sent at once.
@@ -64,6 +69,9 @@ pub enum State {
     /// An outgoing offer waiting for the other person.
     WaitingForPeer,
     Transferring,
+    /// Every byte has been sent; the other side has not yet said the file
+    /// arrived intact. Only then is it delivered.
+    AwaitingConfirmation,
     Finished,
     Refused,
     Cancelled,
@@ -74,7 +82,10 @@ impl State {
     fn active(self) -> bool {
         matches!(
             self,
-            Self::WaitingForYou | Self::WaitingForPeer | Self::Transferring
+            Self::WaitingForYou
+                | Self::WaitingForPeer
+                | Self::Transferring
+                | Self::AwaitingConfirmation
         )
     }
 }
@@ -346,6 +357,8 @@ pub struct Transfers {
     allowed: AtomicBool,
     inner: Mutex<Inner>,
     send: Arc<dyn Fn(Message) -> Result<(), String> + Send + Sync>,
+    /// Replaces the time to wait for a confirmation (tests shorten it).
+    confirm_timeout: Option<Duration>,
 }
 
 impl Transfers {
@@ -361,7 +374,22 @@ impl Transfers {
                 entries: Vec::new(),
             }),
             send: Arc::from(send),
+            confirm_timeout: None,
         }
+    }
+
+    /// How long to wait for the receiver to confirm a file of `size` bytes.
+    fn confirm_deadline(&self, size: u64) -> Duration {
+        self.confirm_timeout.unwrap_or_else(|| {
+            let mib = u32::try_from(size / (1024 * 1024)).unwrap_or(u32::MAX);
+            CONFIRM_BASE.saturating_add(CONFIRM_PER_MIB.saturating_mul(mib))
+        })
+    }
+
+    /// How long a sent file waits for its confirmation (tests shorten it).
+    #[cfg(test)]
+    fn set_confirm_timeout(&mut self, timeout: Duration) {
+        self.confirm_timeout = Some(timeout);
     }
 
     /// How long an incoming offer waits for the person (tests shorten it).
@@ -445,6 +473,17 @@ impl Transfers {
                 });
                 entry.end(State::Refused, "nobody answered in time".to_owned());
             }
+            if entry.state == State::AwaitingConfirmation
+                && entry.deadline.is_some_and(|d| now >= d)
+            {
+                let reason = "the other side did not confirm in time";
+                messages.push(Message::FileCancel {
+                    id: entry.id,
+                    by_sender: true,
+                    reason: reason.to_owned(),
+                });
+                entry.end(State::Failed, reason.to_owned());
+            }
         }
     }
 
@@ -500,12 +539,15 @@ impl Transfers {
                     }
                 }
                 Message::FileDone { id } => {
+                    // Only for a file whose last byte has been sent: a
+                    // confirmation of anything else is not to be believed.
                     if let Some(entry) = inner
                         .find(Direction::Outgoing, *id)
-                        .filter(|e| e.state == State::Transferring)
+                        .filter(|e| e.state == State::AwaitingConfirmation)
                     {
                         entry.state = State::Finished;
                         entry.detail = Some("delivered".to_owned());
+                        entry.deadline = None;
                     }
                 }
                 Message::FileCancel {
@@ -852,6 +894,7 @@ impl Transfers {
                 .find(Direction::Outgoing, id)
                 .filter(|e| e.state == State::Transferring)
                 .ok_or("That transfer is not in progress")?;
+            let confirm_for = self.confirm_deadline(entry.size);
             if entry.done != entry.size {
                 entry.end(
                     State::Failed,
@@ -863,8 +906,11 @@ impl Transfers {
             else {
                 return Err("The transfer is not in progress".to_owned());
             };
-            // Stays "transferring" until the other end confirms.
+            // Not finished until the other end confirms: if it never does,
+            // `expire` fails the transfer after a time limit.
+            entry.state = State::AwaitingConfirmation;
             entry.detail = Some("waiting for the other side to confirm".to_owned());
+            entry.deadline = Some(Instant::now() + confirm_for);
             let mut digest = [0u8; 32];
             digest.copy_from_slice(&hasher.finalize());
             digest

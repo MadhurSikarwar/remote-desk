@@ -104,7 +104,7 @@ device". Then:
   2 GiB, and are marked as downloaded from the internet so Windows warns
   before you run them (when the drive can hold the mark, which FAT/exFAT
   drives and some network or synced folders cannot; the transfer list says
-  when a file could not be marked). Progress and the result are listed; either person can
+  when a file could not be marked). A file is reported as sent only after the receiving side has checked it and confirmed it arrived intact (if it never does, the transfer fails after a time limit and says so). Progress and the result are listed; either person can
   cancel.
 
 The status line under the picture shows the frame rate, the delay from
