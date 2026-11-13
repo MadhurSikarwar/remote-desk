@@ -2742,6 +2742,7 @@ dependencies = [
  "rc-core",
  "rc-crypto",
  "rc-input",
+ "rc-net",
  "rc-protocol",
  "serde",
  "serde_json",

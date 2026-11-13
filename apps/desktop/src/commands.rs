@@ -49,6 +49,8 @@ pub fn start_share(
         max_fps: config.video.max_fps,
         bitrate_kbps: config.video.max_bitrate_kbps,
         allow_input: config.security.allow_input,
+        allow_remote: config.network.allow_remote_connections,
+        lan_discovery: config.network.lan_discovery,
         device_name: config.device.name,
         approval_timeout: Duration::from_secs(u64::from(config.security.approval_timeout_secs)),
     })?;

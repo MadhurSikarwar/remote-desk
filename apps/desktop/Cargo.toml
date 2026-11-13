@@ -14,6 +14,7 @@ rc-codec = { path = "../../crates/rc-codec" }
 rc-core = { path = "../../crates/rc-core" }
 rc-crypto = { path = "../../crates/rc-crypto" }
 rc-input = { path = "../../crates/rc-input" }
+rc-net = { path = "../../crates/rc-net" }
 rc-protocol = { path = "../../crates/rc-protocol" }
 serde.workspace = true
 tauri.workspace = true

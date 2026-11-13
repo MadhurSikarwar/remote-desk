@@ -11,12 +11,18 @@
 //!    sends is acted on;
 //! 4. the session: screen out, and input in if separately allowed.
 //!
-//! The listener still binds to 127.0.0.1 only. Reaching other machines is
-//! the job of the connection milestones.
+//! The listener binds to 127.0.0.1 only, unless the user has allowed
+//! connections from other computers, in which case it listens on all
+//! interfaces. Either way every viewer is encrypted and needs approval.
+//!
+//! Connections are taken in parallel up to a small limit, so that one that
+//! stalls cannot block the others, but only one viewer at a time is asked
+//! for approval or shown the screen: anyone else is told the host is busy.
 
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,11 +33,12 @@ use rc_codec::{EncoderConfig, H264Encoder};
 use rc_crypto::channel::Side;
 use rc_input::mapping::Rect;
 use rc_input::Injector;
-use rc_protocol::{InputEvent, Message, Permissions, Role};
+use rc_net::{Announcement, Responder};
+use rc_protocol::{InputEvent, Message, Permissions, Role, PROTOCOL_VERSION};
 use serde::Serialize;
 
 pub use crate::secure::lock;
-use crate::secure::{establish, exchange_hello, Peer, SecureWriter, Security};
+use crate::secure::{establish, exchange_hello, Peer, SecureReader, SecureWriter, Security};
 
 /// Wait for a screen change this long before checking the stop flag again.
 const POLL_MS: u32 = 100;
@@ -39,6 +46,12 @@ const POLL_MS: u32 = 100;
 const BLOCKED_RETRY: Duration = Duration::from_millis(500);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 const APPROVAL_POLL: Duration = Duration::from_millis(100);
+/// Connections being set up at once. Each is cut off after a few seconds
+/// if it does not complete the handshake.
+const MAX_CONNECTIONS: usize = 8;
+/// After the user refuses a viewer (or does not answer), the next one is
+/// asked to wait this long, so a device cannot keep the prompt on screen.
+const REFUSAL_GAP: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareSettings {
@@ -50,6 +63,10 @@ pub struct ShareSettings {
     /// Whether a viewer may control mouse and keyboard when sharing starts.
     /// The user can change it while sharing is on.
     pub allow_input: bool,
+    /// Accept connections from other computers, not only this one.
+    pub allow_remote: bool,
+    /// While `allow_remote` is on, answer discovery queries on the network.
+    pub lan_discovery: bool,
     /// The name this device gives to viewers.
     pub device_name: String,
     /// How long an approval prompt waits before the answer is "no".
@@ -111,10 +128,26 @@ struct Shared {
     approval: Mutex<Option<Approval>>,
     approval_changed: Condvar,
     next_approval_id: AtomicU64,
+    /// A viewer holds the one place for approval and viewing.
+    busy: AtomicBool,
+    /// When the user last refused a viewer or let a request time out.
+    last_refusal: Mutex<Option<Instant>>,
 }
 
 impl Shared {
+    /// Status for a worker that is neither remote nor discoverable.
+    #[cfg(test)]
     fn status(&self, port: u16, seconds: f64, active: bool) -> ShareStatus {
+        self.status_with(port, seconds, active, (false, false, None))
+    }
+
+    fn status_with(
+        &self,
+        port: u16,
+        seconds: f64,
+        active: bool,
+        (remote, discoverable, lan_address): (bool, bool, Option<String>),
+    ) -> ShareStatus {
         let pending = lock(&self.approval)
             .as_ref()
             .filter(|a| active && a.decision.is_none())
@@ -140,6 +173,9 @@ impl Shared {
             input_events: self.input_events.load(Ordering::Relaxed),
             input_ignored: self.input_ignored.load(Ordering::Relaxed),
             pending,
+            remote: active && remote,
+            discoverable: active && discoverable,
+            lan_address: lan_address.filter(|_| active && remote),
         }
     }
 
@@ -187,6 +223,11 @@ impl Shared {
 
 struct Worker {
     port: u16,
+    remote: bool,
+    discoverable: bool,
+    lan_address: Option<String>,
+    /// Answers discovery queries for as long as sharing is on.
+    _responder: Option<Responder>,
     started: Instant,
     shared: Arc<Shared>,
     thread: JoinHandle<()>,
@@ -215,6 +256,12 @@ pub struct ShareStatus {
     pub input_ignored: u64,
     /// A viewer is waiting for the user's decision.
     pub pending: Option<ApprovalRequest>,
+    /// Other computers may connect (the listener is open to the network).
+    pub remote: bool,
+    /// Whether discovery queries are being answered.
+    pub discoverable: bool,
+    /// The address other computers most likely reach this one at.
+    pub lan_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,15 +325,67 @@ fn unix_time() -> Duration {
         .unwrap_or_default()
 }
 
-/// Handles one connection from handshake to goodbye.
-fn run_session(
+/// A connection that has finished the handshake and the greeting and has
+/// the host's single place for approval and viewing.
+struct Welcomed {
+    writer: SecureWriter,
+    reader: SecureReader,
+    peer: Peer,
+    name: String,
+}
+
+/// Sets up one connection: handshake, greeting, then claims the place for
+/// approval. Runs on a thread of its own so that a slow or silent peer holds
+/// up nobody else. A viewer that arrives while another is being asked, or
+/// is viewing, is told so and turned away.
+fn welcome(
     stream: &TcpStream,
+    settings: &ShareSettings,
+    shared: &Shared,
+    security: &Security,
+) -> Result<Welcomed, String> {
+    let (writer, mut reader, peer) = establish(stream, security.identity(), Side::Responder)?;
+    let name = exchange_hello(&writer, &mut reader, Role::Host, &settings.device_name)?;
+
+    let turn_away = |reason: &str| {
+        let _ = writer.send(&Message::Bye {
+            reason: reason.to_owned(),
+        });
+        writer.shutdown();
+        Err(reason.to_owned())
+    };
+    let recently_refused = lock(&shared.last_refusal).is_some_and(|t| t.elapsed() < REFUSAL_GAP);
+    if recently_refused {
+        return turn_away("try again in a moment");
+    }
+    if shared
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return turn_away("the host is busy with another viewer");
+    }
+    Ok(Welcomed {
+        writer,
+        reader,
+        peer,
+        name,
+    })
+}
+
+/// Handles one welcomed connection from approval to goodbye.
+fn run_session(
+    welcomed: Welcomed,
     settings: &ShareSettings,
     shared: &Arc<Shared>,
     security: &Security,
 ) -> Result<&'static str, String> {
-    let (writer, mut reader, peer) = establish(stream, security.identity(), Side::Responder)?;
-    let name = exchange_hello(&writer, &mut reader, Role::Host, &settings.device_name)?;
+    let Welcomed {
+        writer,
+        mut reader,
+        peer,
+        name,
+    } = welcomed;
 
     // Nothing is captured, sent or accepted until the user says yes.
     let known_since = security.trust().get(&peer.public).map(|d| d.approved_at);
@@ -319,6 +418,9 @@ fn run_session(
         Verdict::TimedOut => Some("the host did not answer"),
         Verdict::Stopped => Some("sharing stopped"),
     };
+    if matches!(verdict, Verdict::Denied | Verdict::TimedOut) {
+        *lock(&shared.last_refusal) = Some(Instant::now());
+    }
     if let Some(reason) = refusal {
         let _ = writer.send(&Message::Bye {
             reason: reason.to_owned(),
@@ -512,12 +614,28 @@ fn stream_frames(
     }
 }
 
-fn serve(
+/// Counts a connection thread while it lives.
+struct ConnectionSlot(Arc<AtomicUsize>);
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Accepts connections until sharing stops, each on a thread of its own.
+///
+/// This runs apart from the thread that handles approval and viewing:
+/// while one viewer is being asked, others must still be able to connect so
+/// that they can be told the host is busy.
+fn accept_loop(
     listener: &TcpListener,
     settings: &ShareSettings,
     shared: &Arc<Shared>,
-    security: &Security,
+    security: &Arc<Security>,
+    welcomed_tx: &mpsc::Sender<(Welcomed, std::net::SocketAddr)>,
 ) {
+    let connections = Arc::new(AtomicUsize::new(0));
     while !shared.stop.load(Ordering::Relaxed) {
         let (stream, peer) = match listener.accept() {
             Ok(accepted) => accepted,
@@ -528,31 +646,82 @@ fn serve(
             Err(e) => {
                 tracing::error!(error = %e, "sharing stopped: cannot accept connections");
                 *lock(&shared.error) = Some(e.to_string());
+                // Ends the other half of `serve` too.
+                shared.stop.store(true, Ordering::Relaxed);
                 return;
             }
         };
-        // The listener is bound to loopback; this is a second check.
-        if !peer.ip().is_loopback() || stream.set_nonblocking(false).is_err() {
+        // Without permission for other computers, only this one.
+        if !(settings.allow_remote || peer.ip().is_loopback())
+            || stream.set_nonblocking(false).is_err()
+        {
             continue;
         }
-
+        if connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            connections.fetch_sub(1, Ordering::AcqRel);
+            tracing::warn!(%peer, "too many connections at once; refusing");
+            continue;
+        }
+        let slot = ConnectionSlot(Arc::clone(&connections));
+        let (settings, shared, security) =
+            (settings.clone(), Arc::clone(shared), Arc::clone(security));
+        let tx = welcomed_tx.clone();
         tracing::info!(%peer, "connection received");
-        let outcome = run_session(&stream, settings, shared, security);
-        shared.viewer_connected.store(false, Ordering::Relaxed);
-        shared.blocked.store(false, Ordering::Relaxed);
-        let (input_events, input_ignored) = (
-            shared.input_events.load(Ordering::Relaxed),
-            shared.input_ignored.load(Ordering::Relaxed),
-        );
-        match outcome {
-            Ok(reason) => {
-                tracing::info!(%peer, reason, input_events, input_ignored, "connection ended");
-            }
-            // A connection that fails before it is approved is not the
-            // user's problem and is not shown as a sharing error.
-            Err(error) => tracing::warn!(%peer, %error, "connection failed"),
+        let spawned = thread::Builder::new()
+            .name("connection".into())
+            .spawn(move || {
+                let _slot = slot;
+                match welcome(&stream, &settings, &shared, &security) {
+                    Ok(welcomed) => {
+                        if tx.send((welcomed, peer)).is_err() {
+                            shared.busy.store(false, Ordering::Release);
+                        }
+                    }
+                    // Failing before approval is not the user's problem and
+                    // is not shown as a sharing error.
+                    Err(error) => tracing::warn!(%peer, %error, "connection not accepted"),
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::error!(error = %e, "cannot start a connection thread");
         }
     }
+}
+
+fn serve(
+    listener: &TcpListener,
+    settings: &ShareSettings,
+    shared: &Arc<Shared>,
+    security: &Arc<Security>,
+) {
+    let (welcomed_tx, welcomed_rx) = mpsc::channel::<(Welcomed, std::net::SocketAddr)>();
+    thread::scope(|scope| {
+        scope.spawn(|| accept_loop(listener, settings, shared, security, &welcomed_tx));
+
+        // Approval and the session itself take place here, one at a time.
+        while !shared.stop.load(Ordering::Relaxed) {
+            match welcomed_rx.recv_timeout(ACCEPT_POLL) {
+                Ok((welcomed, peer)) => {
+                    let outcome = run_session(welcomed, settings, shared, security);
+                    shared.viewer_connected.store(false, Ordering::Relaxed);
+                    shared.blocked.store(false, Ordering::Relaxed);
+                    shared.busy.store(false, Ordering::Release);
+                    let (input_events, input_ignored) = (
+                        shared.input_events.load(Ordering::Relaxed),
+                        shared.input_ignored.load(Ordering::Relaxed),
+                    );
+                    match outcome {
+                        Ok(reason) => {
+                            tracing::info!(%peer, reason, input_events, input_ignored, "connection ended");
+                        }
+                        Err(error) => tracing::warn!(%peer, %error, "connection failed"),
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
 }
 
 pub struct ShareController {
@@ -592,7 +761,12 @@ impl ShareController {
             return Err(format!("display {} does not exist", settings.display));
         }
 
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, settings.port))
+        let bind_address = if settings.allow_remote {
+            Ipv4Addr::UNSPECIFIED
+        } else {
+            Ipv4Addr::LOCALHOST
+        };
+        let listener = TcpListener::bind((bind_address, settings.port))
             .map_err(|e| format!("cannot listen on port {}: {e}", settings.port))?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -601,6 +775,35 @@ impl ShareController {
         shared
             .input_allowed
             .store(settings.allow_input, Ordering::Relaxed);
+
+        // Answer "who is sharing?" only when other computers may connect.
+        let discoverable = settings.allow_remote && settings.lan_discovery;
+        let responder = discoverable
+            .then(|| {
+                Responder::start(Announcement {
+                    name: settings.device_name.clone(),
+                    public_key: *security.identity().public(),
+                    port,
+                    protocol_version: PROTOCOL_VERSION,
+                })
+                .map_err(|e| tracing::warn!(error = %e, "discovery is not available"))
+                .ok()
+            })
+            .flatten();
+        let lan_address = settings
+            .allow_remote
+            .then(rc_net::local_address)
+            .flatten()
+            .map(|ip: IpAddr| ip.to_string());
+        if settings.allow_remote {
+            tracing::warn!(
+                port,
+                discoverable = responder.is_some(),
+                "sharing is open to other computers on the network"
+            );
+        }
+
+        let remote = settings.allow_remote;
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("share".into())
@@ -608,6 +811,10 @@ impl ShareController {
             .map_err(|e| e.to_string())?;
 
         *slot = Some(Worker {
+            remote,
+            discoverable: responder.is_some(),
+            lan_address,
+            _responder: responder,
             port,
             started: Instant::now(),
             shared,
@@ -627,11 +834,18 @@ impl ShareController {
         worker.shared.approval_changed.notify_all();
         let seconds = worker.started.elapsed().as_secs_f64();
         tracing::debug!("waiting for the share thread");
-        if worker.thread.join().is_err() {
+        let extras = Self::extras(&worker);
+        let Worker {
+            port,
+            shared,
+            thread,
+            ..
+        } = worker;
+        if thread.join().is_err() {
             tracing::error!("share thread panicked");
         }
         // Report the totals of the run that just ended.
-        worker.shared.status(worker.port, seconds, false)
+        shared.status_with(port, seconds, false, extras)
     }
 
     /// Answers the approval request with this `id`. An answer for a request
@@ -669,11 +883,20 @@ impl ShareController {
         self.status()
     }
 
+    fn extras(worker: &Worker) -> (bool, bool, Option<String>) {
+        (
+            worker.remote,
+            worker.discoverable,
+            worker.lan_address.clone(),
+        )
+    }
+
     fn status_of(worker: &Worker) -> ShareStatus {
-        worker.shared.status(
+        worker.shared.status_with(
             worker.port,
             worker.started.elapsed().as_secs_f64(),
             !worker.thread.is_finished(),
+            Self::extras(worker),
         )
     }
 
@@ -695,6 +918,9 @@ impl ShareController {
                 input_events: 0,
                 input_ignored: 0,
                 pending: None,
+                remote: false,
+                discoverable: false,
+                lan_address: None,
             },
         }
     }
@@ -712,6 +938,8 @@ pub mod test_support {
             max_fps: 30,
             bitrate_kbps: 4000,
             allow_input: false,
+            allow_remote: false,
+            lan_discovery: false,
             device_name: "Test host".to_owned(),
             approval_timeout: Duration::from_secs(10),
         }
@@ -734,7 +962,16 @@ pub mod test_support {
     /// A viewer made of the raw pieces: connected, handshake and greeting
     /// done, waiting for the host's decision.
     pub fn knock(port: u16, security: &Security, name: &str) -> (SecureWriter, SecureReader, Peer) {
-        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        knock_at((Ipv4Addr::LOCALHOST, port).into(), security, name)
+    }
+
+    /// As [`knock`], at any address.
+    pub fn knock_at(
+        address: std::net::SocketAddr,
+        security: &Security,
+        name: &str,
+    ) -> (SecureWriter, SecureReader, Peer) {
+        let stream = TcpStream::connect(address).unwrap();
         let (writer, mut reader, peer) =
             establish(&stream, security.identity(), Side::Initiator).unwrap();
         exchange_hello(&writer, &mut reader, Role::Viewer, name).unwrap();
