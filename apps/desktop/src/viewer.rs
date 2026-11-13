@@ -16,7 +16,7 @@ use std::time::Duration;
 use rc_clipboard::MemoryClipboard;
 use rc_core::config::TransportPolicy;
 use rc_crypto::channel::Side;
-use rc_crypto::{fingerprint, fingerprint_bytes, parse_fingerprint, Identity, PublicKey};
+use rc_crypto::{fingerprint, fingerprint_bytes, parse_fingerprint, to_hex, Identity, PublicKey};
 use rc_input::keymap::scancode_for;
 use rc_protocol::{InputEvent, Message, MouseButton, Role};
 use rc_rendezvous::DeviceId;
@@ -218,6 +218,10 @@ pub struct HostInfo {
     pub name: String,
     /// Fingerprint of the host's key, which the handshake proved.
     pub fingerprint: String,
+    /// The host's whole public key (hex), which the handshake proved. The
+    /// window keeps it so that reconnecting to a typed address can insist on
+    /// the same device.
+    pub public_key: String,
     /// Must match the code on the host's screen.
     pub auth_code: String,
     /// How the host was reached: directly, or through the server.
@@ -459,6 +463,7 @@ impl ViewerController {
         let name = exchange_hello(&writer, &mut reader, Role::Viewer, device_name)?;
         let host = HostInfo {
             name,
+            public_key: to_hex(&peer.public),
             fingerprint: peer.fingerprint,
             auth_code: peer.auth_code,
             route: route.describe().to_owned(),

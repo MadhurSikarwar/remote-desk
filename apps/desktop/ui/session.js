@@ -660,7 +660,14 @@
   // The key a discovery result announced; a typed address has none. The
   // connection is refused if the device at the address holds another.
   let expectedKey = null;
-  viewPort.addEventListener("input", () => { expectedKey = null; });
+  // The key that answered the person's own connection to a typed address,
+  // proven by the handshake. The automatic reconnect insists on it, so a
+  // different device at the same address is refused instead of being shown as
+  // if nothing had changed. It is the person's decision to connect to a
+  // different device, so editing the address, or pressing Connect again,
+  // forgets it.
+  let learnedKey = null;
+  viewPort.addEventListener("input", () => { expectedKey = null; learnedKey = null; });
 
   const findButton = $("find-devices");
   const findStatus = $("find-status");
@@ -710,11 +717,13 @@
     viewing = true;
     let host;
     try {
-      host = await invoke("view_connect", { address, expectedKey, packets });
+      host = await invoke("view_connect", { address, expectedKey: expectedKey ?? learnedKey, packets });
     } catch (error) {
       viewing = false;
       throw error;
     }
+    // From now on this device, and no other, is the one at this address.
+    if (expectedKey === null && learnedKey === null) learnedKey = host.public_key ?? null;
     viewToggle.textContent = "Disconnect";
     viewPort.disabled = true;
     // Shown as text only: the name is whatever the other device says.
@@ -832,6 +841,7 @@
         const address = viewPort.value.trim();
         if (!address) throw new Error("Enter the device ID or address shown by the sharing device, or find it on the network");
         if (!("VideoDecoder" in window)) throw new Error("This system's web view cannot decode video");
+        learnedKey = null; // the person is choosing again; see above
         await connectNow(address);
       }
     } catch (error) {

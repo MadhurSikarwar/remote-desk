@@ -120,7 +120,11 @@ every 15 seconds, for up to two minutes. **Stop reconnecting** cancels it.
 Each attempt is a new session, so the person at the other computer has to
 **allow it again**. Clipboard sync is off again and a file that was being
 sent has to be sent again. It does not retry when a different device
-answers, when you were refused, or when either person ended the session.
+answers, when you were refused, or when either person ended the session. If
+you typed an address, the reconnect insists on the same device key that
+answered the first time, so a different computer that has taken over that
+address is refused (a device found on the network, or reached by ID, is
+checked the same way as always).
 
 If the connection is slower than the picture needs, the sharing computer
 lowers the picture quality (and briefly holds the picture back) instead of

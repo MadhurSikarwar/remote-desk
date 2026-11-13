@@ -277,6 +277,11 @@ fn connecting_reports_who_answered_and_waits_for_the_host() {
     let host = viewer.connect(&addr(port), None, "Me", sink).unwrap();
     assert_eq!(host.name, "Fakehost");
     assert_eq!(host.fingerprint, host_keys.fingerprint());
+    // The whole key the handshake proved, for pinning a reconnect.
+    assert_eq!(
+        host.public_key,
+        rc_crypto::to_hex(host_keys.identity().public())
+    );
     assert_eq!(host.auth_code.len(), 7);
     assert!(
         viewer.connect(&addr(port), None, "Me", |_| {}).is_err(),

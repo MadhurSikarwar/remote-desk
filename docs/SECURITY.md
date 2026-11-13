@@ -43,7 +43,10 @@ has been done**, and the installer is not signed.
 - **Pinning.** A viewer given a device ID or a discovered key checks that
   the device that answers holds exactly that key, and refuses otherwise. A
   device refuses a server whose key does not match the fingerprint it was
-  given.
+  given. An automatic reconnect to a typed address insists on the key that
+  was proven when the person first connected, so another device that has
+  taken the address is refused (the host's own approval and the code
+  comparison apply to every attempt regardless).
 - **Permissions** (input, clipboard, files) are announced by the host and
   **enforced on the host for every event**, not trusted from the viewer. A
   switch turned off takes effect at once, including letting go of any key the
