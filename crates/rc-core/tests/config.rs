@@ -19,7 +19,7 @@ fn defaults_are_valid_and_secure() {
     assert!(!config.security.allow_file_transfer);
     assert!(config.security.approval_timeout_secs > 0);
     assert!(config.network.rendezvous_servers.is_empty());
-    assert!(config.network.relay_servers.is_empty());
+    assert!(config.network.server_fingerprint.is_empty());
     assert!(!config.network.allow_remote_connections);
 }
 
@@ -42,7 +42,7 @@ fn save_then_load_round_trips() {
     let mut config = Config::default();
     config.device.name = "Workshop PC".into();
     config.network.rendezvous_servers = vec!["rv.example.org:443".into()];
-    config.network.relay_servers = vec!["[2001:db8::1]:443".into()];
+    config.network.server_fingerprint = "0754-E5CE-BDDB-DF24".into();
     config.network.direct_port = 47000;
     config.network.allow_remote_connections = true;
     config.network.lan_discovery = false;
@@ -102,22 +102,52 @@ fn rejects_bad_server_addresses() {
             "network.rendezvous_servers",
             "{entry:?}"
         );
-
-        let mut config = Config::default();
-        config.network.relay_servers = vec![entry.to_owned()];
-        assert_eq!(
-            invalid_field(config.validate()),
-            "network.relay_servers",
-            "{entry:?}"
-        );
     }
 }
 
 #[test]
-fn rejects_relay_only_without_servers() {
+fn a_server_needs_its_fingerprint() {
     let mut config = Config::default();
-    config.network.transport = TransportPolicy::RelayOnly;
-    assert_eq!(invalid_field(config.validate()), "network.transport");
+    config.network.rendezvous_servers = vec!["rv.example.org:443".into()];
+    for bad in [
+        "",
+        "0754",
+        "0754-E5CE-BDDB-DF2",
+        "0754-E5CE-BDDB-DF2Z",
+        "0754-E5CE-BDDB-DF24-00",
+    ] {
+        config.network.server_fingerprint = bad.to_owned();
+        assert_eq!(
+            invalid_field(config.validate()),
+            "network.server_fingerprint",
+            "{bad:?}"
+        );
+    }
+    for good in [
+        "0754-E5CE-BDDB-DF24",
+        "0754e5cebddbdf24",
+        "0754 E5CE BDDB DF24",
+    ] {
+        config.network.server_fingerprint = good.to_owned();
+        config.validate().unwrap_or_else(|e| panic!("{good}: {e}"));
+    }
+    // Without a server the fingerprint is not needed.
+    let mut config = Config::default();
+    config.network.server_fingerprint = "garbage".into();
+    config.validate().unwrap();
+}
+
+#[test]
+fn direct_only_and_relay_only_need_a_server() {
+    use rc_core::config::TransportPolicy;
+    for policy in [TransportPolicy::DirectOnly, TransportPolicy::RelayOnly] {
+        let mut config = Config::default();
+        config.network.transport = policy;
+        assert_eq!(invalid_field(config.validate()), "network.transport");
+        config.network.rendezvous_servers = vec!["rv.example.org:443".into()];
+        config.network.server_fingerprint = "0754-E5CE-BDDB-DF24".into();
+        config.validate().unwrap();
+    }
 }
 
 #[test]

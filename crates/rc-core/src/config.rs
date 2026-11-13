@@ -83,10 +83,14 @@ pub enum TransportPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetworkConfig {
-    /// Rendezvous servers as `host:port`. Empty means LAN-only operation.
+    /// Rendezvous and relay server as `host:port` (one server does both;
+    /// only the first entry is used). Empty means no server: devices can
+    /// then be reached by address or on the local network only.
     pub rendezvous_servers: Vec<String>,
-    /// Relay servers as `host:port`.
-    pub relay_servers: Vec<String>,
+    /// The server's key fingerprint, 16 hex digits, as printed when the
+    /// server starts. Devices refuse a server whose key does not match, so
+    /// this is required whenever a server is set.
+    pub server_fingerprint: String,
     /// Local port for direct connections; 0 lets the OS choose.
     pub direct_port: u16,
     /// Let other computers connect to this one while sharing is on. Off by
@@ -103,7 +107,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             rendezvous_servers: Vec::new(),
-            relay_servers: Vec::new(),
+            server_fingerprint: String::new(),
             direct_port: 0,
             allow_remote_connections: false,
             lan_discovery: true,
@@ -238,6 +242,12 @@ fn validate_server(field: &'static str, entry: &str) -> Result<(), ConfigError> 
     }
 }
 
+/// 16 hex digits, with dashes or spaces allowed between them.
+fn is_fingerprint(text: &str) -> bool {
+    let digits: Vec<char> = text.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    digits.len() == 16 && digits.iter().all(char::is_ascii_hexdigit)
+}
+
 fn check_range(field: &'static str, value: u32, min: u32, max: u32) -> Result<(), ConfigError> {
     if (min..=max).contains(&value) {
         Ok(())
@@ -255,16 +265,20 @@ impl Config {
         for s in &self.network.rendezvous_servers {
             validate_server("network.rendezvous_servers", s)?;
         }
-        for s in &self.network.relay_servers {
-            validate_server("network.relay_servers", s)?;
+        if !self.network.rendezvous_servers.is_empty()
+            && !is_fingerprint(&self.network.server_fingerprint)
+        {
+            return Err(invalid(
+                "network.server_fingerprint",
+                "must be the server's key fingerprint: 16 hex digits, optionally grouped with dashes",
+            ));
         }
-        if self.network.transport == TransportPolicy::RelayOnly
+        if self.network.transport != TransportPolicy::Auto
             && self.network.rendezvous_servers.is_empty()
-            && self.network.relay_servers.is_empty()
         {
             return Err(invalid(
                 "network.transport",
-                "`relay-only` needs at least one rendezvous or relay server",
+                "`direct-only` and `relay-only` apply to connections through a server; set a server first",
             ));
         }
 

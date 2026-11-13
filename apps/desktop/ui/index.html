@@ -147,16 +147,16 @@
           <h2>Network</h2>
           <label>Connection method
             <select name="network.transport">
-              <option value="auto">Automatic: direct first, relay if needed</option>
-              <option value="direct-only">Direct only</option>
-              <option value="relay-only">Relay only</option>
+              <option value="auto">Automatic: direct first, relay through the server if needed</option>
+              <option value="direct-only">Direct only (never through the server)</option>
+              <option value="relay-only">Relay only (always through the server)</option>
             </select>
           </label>
-          <label>Rendezvous servers (one <code>host:port</code> per line)
-            <textarea name="network.rendezvous_servers" rows="2" spellcheck="false"></textarea>
+          <label>Server for reaching devices on other networks (<code>host:port</code>; leave empty for none)
+            <textarea name="network.rendezvous_servers" rows="1" spellcheck="false"></textarea>
           </label>
-          <label>Relay servers (one <code>host:port</code> per line)
-            <textarea name="network.relay_servers" rows="2" spellcheck="false"></textarea>
+          <label>The server's key fingerprint (printed when the server starts)
+            <input name="network.server_fingerprint" type="text" spellcheck="false" autocomplete="off" placeholder="0754-E5CE-BDDB-DF24" />
           </label>
           <label class="check"><input name="network.allow_remote_connections" type="checkbox" /> Let other computers connect while I am sharing (each one still needs your permission)</label>
           <div class="row">
