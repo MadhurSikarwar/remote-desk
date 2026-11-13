@@ -25,6 +25,30 @@ still say "RemoteControl" on purpose: changing them would change what
 identities and codes compute. (Not to be confused with the Prometheus
 monitoring system, which is unrelated.)*
 
+## Download and install (the easy way)
+
+Go to the **[Releases page](https://github.com/MadhurSikarwar/remote-desk/releases/latest)** and download the file
+for your system. No account is needed.
+
+| You have | Download | Then |
+|---|---|---|
+| **Windows 10/11** | [`Prometheus-setup-windows-x64.exe`](https://github.com/MadhurSikarwar/remote-desk/releases/latest/download/Prometheus-setup-windows-x64.exe) | Double-click it. Installs for your user, no administrator rights |
+| Windows, no install | [`Prometheus-portable-windows-x64.exe`](https://github.com/MadhurSikarwar/remote-desk/releases/latest/download/Prometheus-portable-windows-x64.exe) | Double-click it. Nothing is installed; delete the file to remove it |
+| **macOS** (Apple Silicon) | [`Prometheus-macos-apple-silicon.dmg`](https://github.com/MadhurSikarwar/remote-desk/releases/latest/download/Prometheus-macos-apple-silicon.dmg) | Open it, drag Prometheus to Applications, then right-click the app and choose **Open** |
+| **Linux** (x86_64) | [`Prometheus-linux-x64.AppImage`](https://github.com/MadhurSikarwar/remote-desk/releases/latest/download/Prometheus-linux-x64.AppImage) or [`.deb`](https://github.com/MadhurSikarwar/remote-desk/releases/latest/download/Prometheus-linux-x64.deb) | AppImage: `chmod +x` it and run it. Deb: `sudo apt install ./Prometheus-linux-x64.deb` |
+
+Every release also has `SHA256SUMS.txt` to check your download
+(`Get-FileHash <file>` on Windows, `shasum -a 256 <file>` on macOS and Linux).
+
+**The files are not code-signed**, so Windows will warn (**More info**, then
+**Run anyway**) and Smart App Control blocks unsigned programs outright; macOS
+refuses until you right-click and choose Open. See "If Windows blocks it"
+below. Only Windows can share its screen so far (see "Which systems").
+
+*If the Releases page is empty, no release has been published yet: use "Get
+the program" below, or ask the maintainer to run the **Release** workflow
+(Actions tab, Run workflow).*
+
 ## Which systems
 
 | | Windows | macOS | Linux |

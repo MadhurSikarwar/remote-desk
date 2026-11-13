@@ -82,8 +82,10 @@ Or the image: `docker build -f deploy/Dockerfile -t rc-server .`. See
 |---|---|---|
 | `CI` (`ci.yml`), job `windows` | every push | formatting, clippy with warnings as errors, the whole test suite, the window-script tests |
 | `CI`, job `linux-server` | every push | clippy and tests of the server crates on Linux, builds the server image and runs `ci/server-smoke.sh` against it, verifies the systemd unit |
-| `Installer` (`installer.yml`), job `windows-installer` | pushes to `main` that touch code, tags `v*`, manual | builds the installer, writes SHA-256 sums, runs `ci/installer-test.ps1` on the clean runner, keeps the files as a run artifact |
+| `Installer` (`installer.yml`), job `windows-installer` | pushes to `main` that touch code, manual, and as part of `Release` | builds the installer and the portable program, writes SHA-256 sums, runs `ci/installer-test.ps1` on the clean runner, keeps the files as a run artifact |
 | `Installer`, job `linux-server` | same | builds the release server binary and a tarball with the systemd unit, keeps them with a checksum |
+| `Installer`, jobs `linux-desktop`, `macos-desktop` | same | build the `.deb`/`.AppImage` and the `.dmg` (unsigned, never run by a person) |
+| `Release` (`release.yml`) | manual (a tag name), or a pushed tag `v*` | runs `Installer`, names and checksums the files, creates a draft GitHub release |
 
 Tests that need a real, interactive desktop (screen capture, driving the real
 mouse) are marked `#[ignore]` and are **not run on CI**; run them on a
@@ -93,16 +95,37 @@ unless the repository says otherwise).
 
 ## Making a release
 
-There is no automation that publishes. By hand:
+One button, and nothing is public until you say so.
 
 1. Raise the version in `Cargo.toml` and `apps/desktop/tauri.conf.json`
-   (they must match), update the documents that mention numbers, commit.
-2. Wait for `CI` and `Installer` to be green on that commit.
-3. Download the `windows-installer` and `linux-server` artifacts from the
-   `Installer` run; check the SHA-256 against `SHA256SUMS.txt`.
-4. Tag (`git tag v0.1.0 && git push origin v0.1.0`) and attach the files and
-   the checksums to a GitHub release, saying plainly that the installer is
-   unsigned.
+   (they must match), update the documents that mention numbers, commit and
+   push, and wait for `CI` and `Installer` to be green on that commit.
+2. On GitHub: **Actions → Release → Run workflow**, and give the tag, for
+   example `v0.1.0`. (Pushing a tag that starts with `v` does the same.)
+3. The workflow builds everything again (the `Installer` workflow, run as a
+   part of it), gives the files the names below, writes `SHA256SUMS.txt`
+   for exactly those names, and creates a **draft** release.
+4. Open **Releases**, open the draft, read the notes, download one or two
+   files and run them, and press **Publish release**. Until then only people
+   with write access to the repository can see it.
+
+The files in a release (the names never contain a version, so the links
+`.../releases/latest/download/<name>` keep working):
+
+| File | What |
+|---|---|
+| `Prometheus-setup-windows-x64.exe` | Windows installer (per user) |
+| `Prometheus-portable-windows-x64.exe` | Windows program without an installer |
+| `Prometheus-macos-apple-silicon.dmg` | macOS, Apple Silicon only |
+| `Prometheus-linux-x64.AppImage`, `Prometheus-linux-x64.deb` | Linux x86_64 |
+| `Prometheus-server-linux-x64.tar.gz` | the optional relay server and its systemd unit |
+| `SHA256SUMS.txt` | checksums of the above |
+
+`ci/collect-release.sh` does the naming and fails if any file is missing, so
+a release is never half a release. It was tested with a fake set of build
+outputs (complete, one missing, two candidates). **The Release workflow
+itself has not been run yet**: it can only be started from GitHub, and
+starting it creates the draft.
 
 ## Not done
 

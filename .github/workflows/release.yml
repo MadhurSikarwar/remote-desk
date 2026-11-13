@@ -1,0 +1,68 @@
+name: Release
+
+# Builds everything and prepares a DRAFT release: one download per system,
+# named so that a "latest" link keeps working, with checksums. Nothing is
+# public until someone presses "Publish" on the draft.
+#
+# Start it from the Actions tab ("Release", "Run workflow") and give a tag
+# such as v0.1.0, or push a tag that starts with v.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag for the release, for example v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/installer.yml
+
+  draft-release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Name the files and write checksums
+        run: ci/collect-release.sh artifacts release
+      - name: Release notes
+        run: |
+          cat > notes.md <<'NOTES'
+          Prometheus is a remote-desktop application. **This is an early prototype.**
+
+          | System | Download | Notes |
+          |---|---|---|
+          | Windows 10/11 | `Prometheus-setup-windows-x64.exe` | Installer for your user; no administrator rights. Or `Prometheus-portable-windows-x64.exe`: no install, just run it |
+          | macOS (Apple Silicon) | `Prometheus-macos-apple-silicon.dmg` | Can view and control a Windows host; cannot share its own screen yet. Not tried on a real Mac |
+          | Linux (x86_64) | `Prometheus-linux-x64.AppImage` or `.deb` | Same limits as macOS. Not tried on a real Linux desktop |
+          | Server (Linux) | `Prometheus-server-linux-x64.tar.gz` | The optional relay server; see docs/DEPLOYMENT.md |
+
+          **None of these files is code-signed.** Windows will show a SmartScreen
+          warning (More info, then Run anyway), and Smart App Control blocks unsigned
+          programs entirely. macOS will refuse to open the app until you right-click it and
+          choose Open. Check each download against `SHA256SUMS.txt`.
+
+          Only Windows can share its screen so far. What was and was not tested:
+          `docs/PLATFORMS.md`, `docs/SECURITY.md`. Step-by-step instructions: the README.
+          NOTES
+      - name: Create the draft
+        run: |
+          gh release create "$TAG" release/* \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title "Prometheus $TAG" \
+            --notes-file notes.md
+          echo "::notice title=Draft release::$TAG is a draft: open the repository's Releases page, check it, and press Publish"

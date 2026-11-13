@@ -1,12 +1,13 @@
 name: Installer
 
-# Builds the Windows installer and the Linux server binary, tests the
-# installer on a clean machine, and keeps both as downloadable artifacts of
-# the run. It does not publish a release; see docs/RELEASING.md.
+# Builds the Windows installer and portable program, the Linux packages and
+# server, and the macOS package; tests the Windows installer on a clean
+# machine; keeps everything as artifacts of the run. The Release workflow
+# calls this one and turns the artifacts into a draft release (see
+# docs/RELEASING.md).
 on:
   push:
     branches: [main]
-    tags: ["v*"]
     paths:
       - "apps/**"
       - "crates/**"
@@ -15,6 +16,7 @@ on:
       - "Cargo.toml"
       - ".github/workflows/installer.yml"
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: installer-${{ github.ref }}
@@ -49,6 +51,9 @@ jobs:
         shell: bash
         working-directory: apps/desktop
         run: ../../ci/run.sh cargo tauri build
+      - name: Portable program
+        shell: bash
+        run: cp target/release/rc-desktop.exe target/release/bundle/nsis/Prometheus-portable.exe
       - name: Checksums
         shell: bash
         run: |
