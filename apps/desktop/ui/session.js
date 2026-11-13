@@ -255,7 +255,15 @@
     } else if (status.blocked) {
       shareStats.textContent = "Waiting: the lock screen or a system prompt is showing.";
     } else if (live) {
-      shareStats.textContent = `Port ${status.port}. ${status.width}×${status.height} — ${sent}.`;
+      // Said plainly when the video is being slowed for the connection.
+      const pace = status.congestion;
+      const slowed = !pace ? ""
+        : pace.holding
+          ? ` Holding video back: the connection is ${(pace.delay_ms / 1000).toFixed(1)} s behind.`
+          : pace.bitrate_kbps < pace.max_kbps
+            ? ` Video limited to ${(pace.bitrate_kbps / 1000).toFixed(1)} of ${(pace.max_kbps / 1000).toFixed(1)} Mbit/s for this connection.`
+            : "";
+      shareStats.textContent = `Port ${status.port}. ${status.width}×${status.height} — ${sent}.${slowed}`;
     } else {
       shareStats.textContent = status.remote
         ? `Port ${status.port}. Waiting for a viewer.`

@@ -39,6 +39,7 @@ use rc_protocol::{InputEvent, Message, Permissions, Role, PROTOCOL_VERSION};
 use serde::Serialize;
 
 use crate::capabilities::Capabilities;
+use crate::congestion::{CongestionStatus, Controller, Pace};
 use crate::link::{Link, LinkStats, LinkTiming, Monitor};
 use crate::rendezvous::{keep_registered, Registration, ServerLink};
 pub use crate::secure::lock;
@@ -54,6 +55,8 @@ const APPROVAL_POLL: Duration = Duration::from_millis(100);
 /// Connections being set up at once. Each is cut off after a few seconds
 /// if it does not complete the handshake.
 const MAX_CONNECTIONS: usize = 8;
+/// How often to look again while video is held back for the connection.
+const HOLD_POLL: Duration = Duration::from_millis(20);
 /// After the user refuses a viewer (or does not answer), the next one is
 /// asked to wait this long, so a device cannot keep the prompt on screen.
 const REFUSAL_GAP: Duration = Duration::from_secs(3);
@@ -94,6 +97,9 @@ pub struct ShareSettings {
     pub approval_timeout: Duration,
     /// How often to ping the viewer and how long silence may last.
     pub link: LinkTiming,
+    /// Slow the video down when the connection cannot keep up. Off means
+    /// always `bitrate_kbps`, whatever the connection does.
+    pub adaptive: bool,
 }
 
 /// A viewer waiting for the person at this computer to decide.
@@ -151,6 +157,8 @@ struct Shared {
     capabilities: Mutex<Option<Arc<Capabilities>>>,
     /// Liveness and round-trip time of the running session, if any.
     link: Mutex<Option<Arc<Link>>>,
+    /// What the video is being slowed to, while a session adapts.
+    congestion: Mutex<Option<CongestionStatus>>,
     /// Input events acted on, and events ignored because input was off.
     input_events: AtomicU64,
     input_ignored: AtomicU64,
@@ -212,6 +220,7 @@ impl Shared {
                 .filter(|_| active)
                 .map(|c| c.transfers.status()),
             link: link.filter(|_| active).map(|l| l.stats()),
+            congestion: lock(&self.congestion).filter(|_| active),
             input_events: self.input_events.load(Ordering::Relaxed),
             input_ignored: self.input_ignored.load(Ordering::Relaxed),
             pending,
@@ -305,6 +314,9 @@ pub struct ShareStatus {
     /// Round-trip time and liveness of the connection, while a viewer is
     /// connected.
     pub link: Option<LinkStats>,
+    /// The bit rate the video is being held to for the connection's sake,
+    /// while a viewer is connected and adapting is on.
+    pub congestion: Option<CongestionStatus>,
     /// Input events from the viewer that were carried out.
     pub input_events: u64,
     /// Input events discarded because control was not allowed.
@@ -569,16 +581,20 @@ fn run_session(
         &writer,
         settings,
         shared,
-        &closed,
-        &keyframe_wanted,
-        &injector,
-        &capabilities,
+        &Running {
+            closed: &closed,
+            keyframe_wanted: &keyframe_wanted,
+            injector: &injector,
+            capabilities: &capabilities,
+            link: &link,
+        },
     );
     tracing::debug!("frame loop ended");
     lock(&injector).release_all();
     capabilities.end();
     *lock(&shared.capabilities) = None;
     *lock(&shared.link) = None;
+    *lock(&shared.congestion) = None;
 
     // A viewer that went quiet is reported as such, not as whatever write
     // error closing its connection caused.
@@ -608,15 +624,30 @@ fn run_session(
     result
 }
 
+/// The parts of a running session the frame loop works with.
+struct Running<'a> {
+    /// Set by the reader when the viewer has gone.
+    closed: &'a AtomicBool,
+    keyframe_wanted: &'a AtomicBool,
+    injector: &'a Mutex<Injector>,
+    capabilities: &'a Capabilities,
+    link: &'a Link,
+}
+
 fn stream_frames(
     writer: &SecureWriter,
     settings: &ShareSettings,
     shared: &Shared,
-    closed: &AtomicBool,
-    keyframe_wanted: &AtomicBool,
-    injector: &Mutex<Injector>,
-    capabilities: &Capabilities,
+    running: &Running<'_>,
 ) -> Result<&'static str, String> {
+    let Running {
+        closed,
+        keyframe_wanted,
+        injector,
+        capabilities,
+        link,
+    } = *running;
+    let mut controller = Controller::new(settings.bitrate_kbps);
     let mut capturer = Capturer::new(settings.display).map_err(|e| e.to_string())?;
     let mut encoder: Option<H264Encoder> = None;
     let mut nv12 = Vec::new();
@@ -648,6 +679,23 @@ fn stream_frames(
             capabilities.set_files(wanted.files);
             writer.send(&Message::Permissions(wanted))?;
             announced = Some(wanted);
+        }
+
+        // Hold the video back while the connection is behind: what is not
+        // captured is not encoded, so nothing the viewer needs goes missing.
+        let decision = if settings.adaptive {
+            let decision = controller.update(Instant::now(), link.queue_delay_ms());
+            *lock(&shared.congestion) = Some(controller.status());
+            decision
+        } else {
+            Pace {
+                send: true,
+                bitrate_kbps: settings.bitrate_kbps,
+            }
+        };
+        if !decision.send {
+            thread::sleep(HOLD_POLL);
+            continue;
         }
 
         let frame = match capturer.next_frame(POLL_MS) {
@@ -688,6 +736,12 @@ fn stream_frames(
         let Some(encoder) = encoder.as_mut() else {
             continue;
         };
+        if encoder.bitrate_kbps() != decision.bitrate_kbps {
+            encoder
+                .set_bitrate_kbps(decision.bitrate_kbps)
+                .map_err(|e| e.to_string())?;
+            tracing::debug!(kbps = decision.bitrate_kbps, "video bit rate changed");
+        }
 
         nv12.resize(nv12_len(width as usize, height as usize), 0);
         bgra_to_nv12(
@@ -1109,6 +1163,7 @@ impl ShareController {
                 clipboard_received: 0,
                 transfers: None,
                 link: None,
+                congestion: None,
                 input_events: 0,
                 input_ignored: 0,
                 pending: None,
@@ -1144,6 +1199,7 @@ pub mod test_support {
             device_name: "Test host".to_owned(),
             approval_timeout: Duration::from_secs(10),
             link: LinkTiming::default(),
+            adaptive: true,
         }
     }
 

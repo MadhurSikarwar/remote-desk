@@ -65,6 +65,7 @@ pub fn start_share(
         device_name: config.device.name,
         approval_timeout: Duration::from_secs(u64::from(config.security.approval_timeout_secs)),
         link: LinkTiming::default(),
+        adaptive: config.video.adaptive_quality,
     })?;
     // `display` cannot be used as a field name: the macro shadows it.
     let index = display;
