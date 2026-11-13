@@ -1,0 +1,29 @@
+[package]
+name = "rc-server"
+description = "Rendezvous and relay server for Remote Control"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rc_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rc-server"
+path = "src/main.rs"
+
+[dependencies]
+getrandom = "0.2"
+rc-crypto = { path = "../../crates/rc-crypto" }
+rc-rendezvous = { path = "../../crates/rc-rendezvous" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

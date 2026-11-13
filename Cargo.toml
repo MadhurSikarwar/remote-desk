@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rc-core", "crates/rc-capture", "crates/rc-codec", "crates/rc-crypto", "crates/rc-input", "crates/rc-net", "crates/rc-protocol", "crates/rc-rendezvous", "apps/desktop"]
+members = ["crates/rc-core", "crates/rc-capture", "crates/rc-codec", "crates/rc-crypto", "crates/rc-input", "crates/rc-net", "crates/rc-protocol", "crates/rc-rendezvous", "apps/desktop", "apps/server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +17,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 tempfile = "3"
 tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros", "signal"] }
 tauri-build = { version = "2", features = [] }
 
 [workspace.lints.rust]
