@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 
 /// Bumped on any incompatible change; peers with different versions refuse
 /// to talk.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Upper bound on one message, so a corrupt or hostile length prefix cannot
 /// make the reader allocate without limit. A 4K keyframe is far below this.
@@ -183,6 +183,11 @@ pub enum Message {
         by_sender: bool,
         reason: String,
     },
+    /// Liveness check, sent by both ends while a session runs. The other end
+    /// answers with a [`Message::Pong`] carrying the same `nonce`.
+    Ping { nonce: u64 },
+    /// The answer to a [`Message::Ping`].
+    Pong { nonce: u64 },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -215,6 +220,8 @@ mod tag {
     pub const FILE_END: u8 = 13;
     pub const FILE_CANCEL: u8 = 14;
     pub const FILE_DONE: u8 = 15;
+    pub const PING: u8 = 16;
+    pub const PONG: u8 = 17;
 }
 
 mod input_tag {
@@ -473,6 +480,14 @@ impl Message {
                 out.push(tag::FILE_DONE);
                 out.extend_from_slice(&id.to_le_bytes());
             }
+            Self::Ping { nonce } => {
+                out.push(tag::PING);
+                out.extend_from_slice(&nonce.to_le_bytes());
+            }
+            Self::Pong { nonce } => {
+                out.push(tag::PONG);
+                out.extend_from_slice(&nonce.to_le_bytes());
+            }
             Self::FileCancel {
                 id,
                 by_sender,
@@ -547,6 +562,8 @@ impl Message {
                 sha256: r.array()?,
             },
             tag::FILE_DONE => Self::FileDone { id: r.u32()? },
+            tag::PING => Self::Ping { nonce: r.u64()? },
+            tag::PONG => Self::Pong { nonce: r.u64()? },
             tag::FILE_CANCEL => Self::FileCancel {
                 id: r.u32()?,
                 by_sender: r.bool()?,
@@ -716,6 +733,10 @@ mod tests {
                 sha256: [0x5A; 32],
             },
             Message::FileDone { id: 7 },
+            Message::Ping { nonce: u64::MAX },
+            Message::Pong {
+                nonce: 0x0123_4567_89AB_CDEF,
+            },
             Message::FileCancel {
                 id: 7,
                 by_sender: true,

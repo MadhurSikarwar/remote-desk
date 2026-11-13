@@ -2,6 +2,7 @@
 
 mod capabilities;
 mod commands;
+mod link;
 mod rendezvous;
 mod secure;
 mod share;
