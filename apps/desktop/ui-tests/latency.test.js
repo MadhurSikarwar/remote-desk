@@ -53,10 +53,13 @@ test("a host clock minutes off does not show up as latency", async () => {
 test("pictures arriving later than they recently did are shown, whatever the clock offset", async () => {
   for (const skewMs of [-600_000, +600_000]) {
     const page = await started(skewMs);
-    // Steady for a while, then each picture is 300 ms later than before.
+    // Steady for a while, then each picture is 300 ms later than before. The
+    // figure averages the last second, so the late spell must last longer
+    // than that (by the clock, not by a picture count: timers differ).
     await feed(page, { count: 25, skewMs });
     page.window.__showViewStats();
-    await feed(page, { count: 25, skewMs, lag: () => 300 });
+    const until = Date.now() + 1300;
+    while (Date.now() < until) await feed(page, { count: 1, skewMs, lag: () => 300 });
     const text = stats(page);
     const extra = Number(/(\d+) ms later than/.exec(text)?.[1]);
     assert.ok(extra >= 200 && extra <= 400, `skew ${skewMs} ms: expected about 300 ms later, got: ${text}`);
