@@ -694,6 +694,9 @@ fn a_sharing_device_is_discoverable_only_while_it_allows_it() {
 
 /// Eight slow peers used to be enough to hold every place for connections
 /// for as long as they cared to keep trickling bytes.
+///
+/// Windows only, like sharing itself: elsewhere `start` refuses at once.
+#[cfg(windows)]
 #[test]
 fn slow_peers_cannot_hold_all_the_connection_places() {
     use std::io::Write;
