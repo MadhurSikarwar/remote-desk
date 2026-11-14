@@ -33,7 +33,7 @@ jobs:
       - name: Test
         run: ci/run.sh cargo test --workspace --locked
       - name: Window script tests
-        run: node --test apps/desktop/ui/reconnect.test.js apps/desktop/ui-tests/*.test.js
+        run: ci/run.sh node --test apps/desktop/ui/reconnect.test.js apps/desktop/ui-tests/*.test.js
 
   # The server is the part that runs on Linux: build, lint and test it there,
   # then check the container image and the systemd unit the deployment guide
